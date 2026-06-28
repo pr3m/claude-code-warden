@@ -97,6 +97,7 @@ case "$cmd" in
     printf '  version        : %s\n' "$(warden_version)"
     printf '  platform       : %s\n' "$(warden_platform)"
     printf '  terminal       : %s (TERM_PROGRAM=%s)\n' "$(warden_term)" "${TERM_PROGRAM:-unset}"
+    printf '  CC title write : %s\n' "$([ -n "${CLAUDE_CODE_DISABLE_TERMINAL_TITLE:-}" ] && echo 'disabled — warden owns the tab (good)' || echo 'ENABLED — Claude Code overwrites warden titles! set CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 (see README)')"
     printf '  tty resolved   : %s\n' "$(warden_tty || echo 'FAILED')"
     printf '  label (tab)    : %s\n' "$(warden_label_for "$(warden_tty)" "$PWD")"
     printf '  jq present     : %s\n' "$(warden_has_jq && echo yes || echo 'NO — context meter + cockpit degraded')"

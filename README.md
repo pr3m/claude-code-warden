@@ -31,12 +31,25 @@ kind* of work, a needs-you alarm escalates so nothing waits unnoticed, and
 /plugin install warden
 ```
 
-That's it — no config, no setup. warden is hook-driven: it starts working the
-moment you submit your next prompt in any Claude Code tab. (`jq` recommended:
-`brew install jq` — the spinner and glyphs work without it; the context meter and
-cockpit need it.)
+**One required step:** Claude Code writes its own terminal title (`·` working,
+`✳` idle) and will overwrite warden's. Turn it off in `~/.claude/settings.json`
+(top level), then restart your sessions:
 
-Verify: `/warden:doctor`.
+```json
+"env": {
+  "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"
+}
+```
+
+(Official env var, [confirmed by Anthropic](https://x.com/bcherny/status/2007957770725949686).
+Without it the spinner still shows *while a turn runs*, but warden's label/`✅`
+vanishes the instant the turn ends and Claude repaints the title.)
+
+Otherwise no config: warden is hook-driven and starts on your next prompt in any
+tab. (`jq` recommended: `brew install jq` — the spinner and glyphs work without
+it; the context meter and cockpit need it.)
+
+Verify: `/warden:doctor` (it reports whether the title override is disabled).
 
 ---
 
@@ -190,11 +203,13 @@ Status bus schema:
 
 ## Troubleshooting
 
-- **Titles flicker between warden's and Claude's own** — Claude Code sets the tab
-  title too. warden owns it during a turn, but if they fight, try
-  `export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` in your shell rc. See the open
-  Claude Code requests [#29349](https://github.com/anthropics/claude-code/issues/29349),
-  [#22578](https://github.com/anthropics/claude-code/issues/22578).
+- **warden's label/glyph shows while working but reverts when the turn ends** —
+  this is the big one. Claude Code writes its own title (`·` working, `✳` idle);
+  it overwrites warden's the moment a turn finishes. **Fix:** set
+  `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` (see Install — the `env` block in
+  `~/.claude/settings.json`) and restart your sessions. `/warden:doctor` reports
+  whether it's disabled. (Claude's title write is hardcoded and event-driven, so
+  warden can't beat it from a hook — it has to be turned off.)
 - **Nothing appears in Ghostty** — make sure you don't have `title = …` pinned in
   your Ghostty config (it freezes escape-sequence titles). Run `/warden:doctor`.
 - **In tmux** — add `set -g allow-passthrough on` to `~/.tmux.conf`.

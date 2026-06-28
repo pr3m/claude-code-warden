@@ -5,10 +5,26 @@ description: Explain how warden works and how to get it running — it's automat
 
 # /warden:install
 
-warden is **hook-driven — there's no install step beyond enabling the plugin**.
-Once installed, its hooks fire on every Claude Code session automatically.
+warden is **hook-driven** — its hooks fire on every Claude Code session
+automatically once the plugin is enabled. There is **one required one-time
+setup step**, because Claude Code writes its own terminal title (`·` while
+working, `✳` when idle) and will overwrite warden's unless you turn that off.
 
-Confirm it's live:
+**Required: disable Claude Code's terminal-title writes.** Add this to
+`~/.claude/settings.json` (top level), then restart your sessions:
+
+```json
+"env": {
+  "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"
+}
+```
+
+Without it, warden's spinner still shows *while a turn runs* (it repaints ~8×/s
+and wins), but the moment a turn ends Claude Code repaints the title and
+warden's label/`✅` disappears. This is the single most common "warden titles
+don't stick" cause. (Official env var, confirmed by Anthropic.)
+
+Confirm it's live — `doctor` reports whether the override is disabled:
 
 ```sh
 ~/.claude/warden/bin/warden doctor

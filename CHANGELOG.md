@@ -3,6 +3,21 @@
 All notable changes to **warden** are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.4] — unreleased
+
+### Fixed / Docs
+- **Document the required `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` setup.** Claude
+  Code writes its own terminal title (hardcoded `·` while working, `✳` when
+  idle) and overwrites warden's the instant a turn ends — so warden's label/glyph
+  appeared to "not stick" in the real terminal tab even though warden wrote it
+  correctly. warden can't beat an event-driven write from a hook, so Claude's
+  title management must be turned off. Install + Troubleshooting + the
+  `/warden:install` skill now make this the required first step (env block in
+  `~/.claude/settings.json`).
+- **`warden doctor`** now reports whether `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is
+  set (`CC title write: disabled` vs a loud `ENABLED — Claude Code overwrites
+  warden titles!`).
+
 ## [0.1.3] — unreleased
 
 ### Added
