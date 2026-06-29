@@ -3,6 +3,38 @@
 All notable changes to **warden** are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.5] — unreleased
+
+### Fixed
+- **Tab labels no longer bleed across sessions.** warden keyed a tab's title
+  output and its custom-label file to the terminal device path (`/dev/ttysNNN`),
+  which macOS recycles when one tab closes and another opens. A background daemon
+  (spinner / escalate) or a `<tty>.label` left behind by a closed session could
+  then paint that dead session's glyph/label onto the unrelated new session that
+  inherited the same device number — including an escalate daemon caught nagging a
+  recycled tty for over a day. Fixed with **tty ownership arbitration**: a
+  `<tty>.owner` file records the live session that owns each device; every hook
+  claims its device before painting (reaping the prior owner's orphaned daemons and
+  clearing its stale label), and both daemons re-check ownership each tick and exit
+  the moment they lose the device. The escalate daemon also gained the
+  max-lifetime self-reap the spinner already had. (A custom label now survives a
+  resume but not a brand-new session in the same tab — a recycled label is exactly
+  the bleed being fixed.)
+- **Context meter is correct on 1M-window sessions.** The `[1m]` context tier is
+  invisible to a hook — the transcript's per-message `model` is the bare base id
+  (e.g. `claude-opus-4-8`) and no env var carries it — so warden divided by the
+  200k standard window and overstated fill ~5× (a 16%-full session read as ~100%).
+  The meter now resolves the true window in layers: an explicit
+  `.contextWindowOverride`, else the 1M tier when the model field carries a `1m`
+  marker or `~/.claude.json` records a `<base>[1m]` usage for the project, else the
+  200k standard — auto-upgraded to 1M whenever observed usage already exceeds 200k
+  (a turn can't use more tokens than its own window).
+
+### Hardened
+- The `<tty>.owner` file is written atomically (temp + rename) and a write failure
+  is logged rather than swallowed; the foreign-daemon reap is command-guarded so a
+  recycled PID belonging to an unrelated process is never signalled.
+
 ## [0.1.4] — unreleased
 
 ### Fixed / Docs

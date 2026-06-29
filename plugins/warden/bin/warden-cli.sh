@@ -119,7 +119,7 @@ case "$cmd" in
       warden_kill_pidfile "$p"; n=$((n + 1))
     done
     rm -f "$(warden_sessions_dir)"/*.json "$(warden_sessions_dir)"/*.render \
-          "$(warden_sessions_dir)"/*.label 2>/dev/null || true
+          "$(warden_sessions_dir)"/*.label "$(warden_sessions_dir)"/*.owner 2>/dev/null || true
     printf '🛡  warden: stopped %s daemon(s), cleared the status bus.\n' "$n"
     ;;
 

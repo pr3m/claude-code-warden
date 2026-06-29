@@ -33,6 +33,12 @@ ID="$(printf '%s' "$ID" | tr -c 'A-Za-z0-9._-' '_')"
 TTY="$(warden_tty)"
 [ -z "$ID" ] && ID="tty$(printf '%s' "$TTY" | tr -c 'A-Za-z0-9' '_')"
 CWD="$(warden_payload_get '.cwd')"; [ -z "$CWD" ] && CWD="$PWD"
+
+# Claim this terminal device for this session BEFORE computing the label: if a
+# prior session's number was recycled onto this tab, this reaps its orphaned
+# daemons and drops its stale custom label so PROJECT reflects our own context.
+warden_claim_tty "$TTY" "$ID"
+
 PROJECT="$(warden_label_for "$TTY" "$CWD")"   # honours a custom tab label / $WARDEN_LABEL
 
 # Reap stale daemons in case a prior session with this id crashed.
@@ -42,7 +48,7 @@ warden_kill_pidfile "$(warden_escalate_pid "$ID")"
 # Session ids are unique, so bus files would otherwise accumulate forever.
 # Prune anything untouched for over a day, drop orphaned pidfiles whose process
 # is dead, and remove stale singleton locks. Cheap, self-healing, once/session.
-find "$(warden_sessions_dir)" -type f \( -name '*.json' -o -name '*.render' \) \
+find "$(warden_sessions_dir)" -type f \( -name '*.json' -o -name '*.render' -o -name '*.owner' \) \
   -mtime +1 -delete 2>/dev/null || true
 for p in "$(warden_sessions_dir)"/*.pid; do
   [ -f "$p" ] || continue

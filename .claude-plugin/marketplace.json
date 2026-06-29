@@ -9,7 +9,7 @@
       "name": "warden",
       "source": "./plugins/warden",
       "description": "Keep watch over a fleet of parallel Claude Code sessions. Animated tab spinner while working, activity-aware glyphs (running tests vs reading vs web), a needs-you alarm that escalates, stuck detection, and a /cockpit fleet view. Ghostty-first, works in iTerm2/Terminal/tmux.",
-      "version": "0.1.4"
+      "version": "0.1.5"
     }
   ]
 }

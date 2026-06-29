@@ -153,6 +153,77 @@ warden_label_for() {
   warden_project "$cwd"
 }
 
+# ---------------------------------------------------------------------------
+# TTY ownership — the device path /dev/ttysNNN is NOT a stable identity: macOS
+# recycles the number when one pty closes and a new tab opens. The stable
+# identity is the session id (already used for render/bus/pidfiles). We record
+# which session currently owns each tty in a <tty>.owner file, and have every
+# long-lived writer verify it still owns the tty before painting — so a daemon
+# (or a custom tab label) left behind by a closed session can never bleed onto
+# the unrelated session that later inherits the same device number.
+# ---------------------------------------------------------------------------
+
+warden_owner_path() {
+  printf '%s/%s.owner\n' "$(warden_sessions_dir)" \
+    "$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9' '_')"
+}
+
+# Current owning session id for a tty (empty if unclaimed).
+warden_owner_read() {
+  local op; op="$(warden_owner_path "${1:-}")"
+  [ -f "$op" ] || return 0
+  head -n1 "$op" 2>/dev/null
+}
+
+# Claim a tty for a session. If a *different* session previously owned it, that
+# tab is gone (the device number was recycled), so reap its orphaned daemons
+# and drop its custom tab label before either can bleed onto us. A no-op when we
+# already own the tty, so it's cheap to call from every hook. Skips the bare
+# controlling-terminal path, which can't be arbitrated (every fallback session
+# would share the one /dev/tty key and falsely reap each other).
+warden_claim_tty() {
+  local tty="${1:-}" id="${2:-}" prev op tmp
+  [ -n "$tty" ] && [ -n "$id" ] || return 0
+  [ "$tty" = "/dev/tty" ] && return 0
+  prev="$(warden_owner_read "$tty")"
+  [ "$prev" = "$id" ] && return 0
+  if [ -n "$prev" ]; then
+    # The previous owner's tab is gone (its device number was recycled onto us),
+    # so reap its daemons and drop its custom tab label before either can bleed
+    # onto this session. A custom label therefore survives a resume (same session
+    # id → the no-op return above) but a brand-new session in this tab starts
+    # from the auto label — by design: a recycled label is exactly the reported
+    # cross-session bleed, and the label file is read into our own title/bus.
+    warden_kill_daemon_pidfile "$(warden_spinner_pid "$prev")"
+    warden_kill_daemon_pidfile "$(warden_escalate_pid "$prev")"
+    rm -f "$(warden_label_path "$tty")" 2>/dev/null || true
+  fi
+  warden_ensure_dirs
+  # Atomic write (temp + rename), mirroring the render/bus writers, so a daemon's
+  # concurrent owner read never sees a half-written id. Log a failure rather than
+  # swallow it: a stale owner file would make this session's own daemons self-evict.
+  op="$(warden_owner_path "$tty")"; tmp="${op}.$$.tmp"
+  if printf '%s\n' "$id" > "$tmp" 2>/dev/null && mv -f "$tmp" "$op" 2>/dev/null; then
+    :
+  else
+    rm -f "$tmp" 2>/dev/null
+    warden_log "WARN: warden_claim_tty: could not record owner for $tty (id=$id)"
+  fi
+}
+
+# True when this session still owns the tty. Long-lived daemons call this each
+# tick and exit the moment a newer session takes the device over. Deliberately
+# tolerant: an unknown tty/id, the bare /dev/tty, or a missing owner file all
+# return success, so a daemon only self-evicts on a *definite* different owner.
+warden_owns_tty() {
+  local tty="${1:-}" id="${2:-}" owner
+  [ -n "$tty" ] && [ -n "$id" ] || return 0
+  [ "$tty" = "/dev/tty" ] && return 0
+  owner="$(warden_owner_read "$tty")"
+  [ -z "$owner" ] && return 0
+  [ "$owner" = "$id" ]
+}
+
 # Re-apply the effective label to every session bound to a tty, live: rewrite
 # the render project (a running spinner picks it up next tick), the bus project
 # (cockpit), and repaint a static title (so idle/done/needs_you update at once).
@@ -411,6 +482,23 @@ warden_pid_alive() {
   [ -f "$f" ] || return 1
   pid="$(cat "$f" 2>/dev/null)"
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# Like warden_kill_pidfile, but only signals a process whose command still looks
+# like a warden daemon. Used on the foreign-reap path (claiming a recycled tty),
+# where the recorded PID may have died and been recycled by the OS to an
+# unrelated process — we must not SIGTERM that. Always clears the stale pidfile.
+warden_kill_daemon_pidfile() {
+  local f="$1" pid
+  [ -f "$f" ] || return 0
+  pid="$(cat "$f" 2>/dev/null)"
+  case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+  if [ -n "$pid" ] && [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null; then
+    case "$(ps -o command= -p "$pid" 2>/dev/null)" in
+      *spinner-daemon*|*escalate-daemon*) kill "$pid" 2>/dev/null || true ;;
+    esac
+  fi
+  rm -f "$f" 2>/dev/null || true
 }
 
 # Resolve the plugin root (dir containing bin/ and hooks/) from this file.

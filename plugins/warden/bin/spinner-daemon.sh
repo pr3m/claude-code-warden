@@ -70,6 +70,9 @@ warden_write_progress "$TTY" 3 0
 while :; do
   # Stop animating the moment the render file is gone or the turn ended.
   [ -f "$RENDER" ] || break
+  # Stop the instant a newer session has taken this terminal device over (the
+  # OS recycled the /dev/ttysNNN number) — never paint our title onto its tab.
+  warden_owns_tty "$TTY" "$ID" || break
   line="$(cat "$RENDER" 2>/dev/null)"
   # Tolerate a transient empty read during an atomic rewrite — retry next tick.
   [ -n "$line" ] || { sleep "$SLEEP_S"; continue; }

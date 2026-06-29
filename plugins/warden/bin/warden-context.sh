@@ -34,10 +34,41 @@ USED="$(printf '%s' "$TAIL" | jq -rR '
 [ -n "$USED" ] || exit 0
 
 MODEL="$(printf '%s' "$TAIL" | jq -rR 'fromjson? | .message.model // empty' 2>/dev/null | tail -n1)"
-case "$MODEL" in
-  *1m*) MAX="$(warden_cfg '.contextMax1m' '1000000')" ;;
-  *)    MAX="$(warden_cfg '.contextMax' '200000')" ;;
-esac
+CWD="$(printf '%s' "$TAIL" | jq -rR 'fromjson? | .cwd // empty' 2>/dev/null | tail -n1)"
+
+STD_MAX="$(warden_cfg '.contextMax' '200000')"
+BIG_MAX="$(warden_cfg '.contextMax1m' '1000000')"
+OVERRIDE="$(warden_cfg '.contextWindowOverride' '')"
+
+# Pick the denominator (the true context window). The [1m] 1M tier is invisible
+# to a hook: the transcript's per-message model is the bare base id (e.g.
+# "claude-opus-4-8"), the environment carries no model, and only ~/.claude.json
+# persists the full "<base>[1m]" id (under projects[cwd].lastModelUsage). So:
+#   1. an explicit .contextWindowOverride wins outright;
+#   2. else treat as 1M if the model field itself carries a 1m marker, or if
+#      Claude Code recorded a "<base>[1m]" usage for this project;
+#   3. else the standard window — auto-upgraded to the 1M tier when observed
+#      usage already exceeds it (a turn can't use more tokens than its window).
+if [ -n "$OVERRIDE" ] && [ "$OVERRIDE" -gt 0 ] 2>/dev/null; then
+  MAX="$OVERRIDE"
+else
+  is1m=no
+  case "$MODEL" in *1m*) is1m=yes ;; esac
+  if [ "$is1m" = no ] && [ -n "$MODEL" ] && [ -n "$CWD" ] && warden_has_jq && [ -f "$HOME/.claude.json" ]; then
+    if jq -e --arg b "$MODEL" --arg c "$CWD" '
+         (.projects[$c].lastModelUsage // {} | keys[])
+         | select(startswith($b) and test("1m"))
+       ' "$HOME/.claude.json" >/dev/null 2>&1; then
+      is1m=yes
+    fi
+  fi
+  if [ "$is1m" = yes ]; then
+    MAX="$BIG_MAX"
+  else
+    MAX="$STD_MAX"
+    [ "$USED" -gt "$MAX" ] 2>/dev/null && MAX="$BIG_MAX"
+  fi
+fi
 
 awk -v u="$USED" -v m="$MAX" 'BEGIN {
   if (m + 0 <= 0) exit

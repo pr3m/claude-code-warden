@@ -24,6 +24,11 @@ trap 'exit 0' TERM INT HUP
 
 DELAY="$(warden_cfg '.escalateAfterSeconds' '45')"
 REPING="$(warden_cfg '.escalateReping' 'true')"
+# Self-reap bound (the spinner has one; without it a session that ends without
+# its Stop/Notification hook firing leaves this loop nagging a dead — or worse,
+# recycled — tty indefinitely).
+MAXLIFE="$(warden_cfg '.maxLifetimeSeconds' '7200')"
+START_TS="$(warden_now)"
 
 # Populated by still_waiting() from a single render read (avoids a second,
 # racy read in the loop and an unbound-variable abort under set -u).
@@ -43,6 +48,10 @@ ping() {
 while :; do
   sleep "$DELAY"
   still_waiting || break
+  # A newer session took this terminal device over, or we've outlived the cap —
+  # stop nagging so we never ping/paint onto an unrelated tab.
+  warden_owns_tty "$TTY" "$ID" || break
+  [ "$(( $(warden_now) - START_TS ))" -ge "$MAXLIFE" ] 2>/dev/null && break
   warden_write_title "$TTY" "$(warden_compose_title escalated "$PROJECT" "" "$CTX")"
   ping
 done

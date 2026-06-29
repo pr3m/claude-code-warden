@@ -15,6 +15,7 @@ ID="$(printf '%s' "$ID" | tr -c 'A-Za-z0-9._-' '_')"
 TTY="$(warden_tty)"
 [ -z "$ID" ] && ID="tty$(printf '%s' "$TTY" | tr -c 'A-Za-z0-9' '_')"
 [ -z "$TTY" ] && TTY="$(warden_bus_read "$ID" tty)"
+warden_claim_tty "$TTY" "$ID"   # own this device before painting (recycled-tty guard)
 
 TOOL="$(warden_payload_get '.tool_name')"
 CMD="$(warden_payload_get '.tool_input.command')"

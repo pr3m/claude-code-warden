@@ -1,6 +1,6 @@
 {
   "name": "warden",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Keep watch over your fleet of parallel Claude Code sessions. An animated spinner rides each terminal tab while Claude works, an activity-aware glyph shows what kind of work (bash / tests / reading / web / thinking / subagent), a needs-you alarm escalates so a blocked session never waits unnoticed, stuck turns flag themselves, and /cockpit gives you a live fleet view. Ghostty-first; the OSC core also works in iTerm2, Terminal.app, and tmux.",
   "author": {
     "name": "Christjan Schumann",
