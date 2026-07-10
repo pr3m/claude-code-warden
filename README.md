@@ -10,7 +10,7 @@ different tab? warden answers all three at a glance, without you switching tabs:
   ⠙ 🔧 wunda            ← spinning: working, running a bash command
   ⠹ 🧪 redmy            ← spinning: working, running tests
   ❓ wundamental-web    ← needs you (permission / input) — escalates if ignored
-  🐢 ⠼ 🤖 mia           ← still working, but this turn is dragging
+  🐢 ⠼ 🤖 mia           ← nothing has happened for a while — worth a look
   ✅ smartbeat          ← done, your move
   · personal           ← idle
 ```
@@ -60,16 +60,24 @@ Verify: `/warden:doctor` (it reports whether the title override is disabled).
 | Glyph | State | When |
 |------:|-------|------|
 | `⠙` (animated) | **working** | Claude is on your turn |
-| `🔧 🧪 📖 ✏️ 🔎 🌐 🤖 🧠` | **activity** | what kind of work, from the tool in flight |
+| `🔧 🧪 🧹 📖 ✏️ 🔎 🌐 🤖 🗒️ ⚡ 🔌 🧠` | **activity** | what kind of work, from the tool in flight (`🧠` = thinking, no tool running) |
 | `❓` | **needs you** | Claude asked for permission/input |
 | `‼️` | **escalated** | still waiting after `escalateAfterSeconds` (+ re-ping) |
-| `🐢` / `⏳` | **stuck** | the turn has been running a long time |
+| `🐢` | **stalled** | nothing has happened for `stuckAfterSeconds`, and no tool is running |
+| `⏳` | **stalled longer** | same, past `stuck2AfterSeconds` — or a single tool has run for `slowToolAfterSeconds` (a command hung on stdin looks exactly like this) |
 | `✅` | **done** | turn finished — your move |
 | `·` | **idle** | session open, nothing running |
 
+**`🐢` measures progress, not duration.** An agent may legitimately work for
+hours; what matters is whether anything is still happening. warden beats a
+heartbeat on every tool call and every tool return, and a tool that is genuinely
+executing suppresses the stall markers — so a 20-minute test suite spins happily,
+while a session that went quiet five minutes ago flags itself.
+
 Each tab also shows the **project** (git repo name by default) and, past a
 threshold, the **context-window fill** (`·78%`) so auto-compaction never
-surprises you.
+surprises you. The meter is recomputed *during* the turn, so it warns you on the
+turn that crosses the threshold rather than after it.
 
 ### The cockpit
 
@@ -78,17 +86,25 @@ surprises you.
 ```
 
 ```
-🛡  warden · 2 working · 1 need you · 1 done · 1 idle
+🛡  warden · 2 working · 1 need you · 1 stalled · 1 done · 1 idle
 
-   ❓  needs_you  wundamental-web      2m         what should the CTA say?
+   ‼️   escalated  wundamental-web      4m         what should the CTA say?
+   ❓  needs_you  mia                  2m         approve the migration?
+   🐢  stalled    sage           📖   6m    41%   trace the booking webhook
    ⚙   working    wunda          🔧   14s   78%   fix the SOF marker map
-   ⚙   working    redmy          🧪   1m          add the retry tests
+   ⏳  slow op    redmy          🧪   22m         add the retry tests
    ✅  done       smartbeat            -          reconcile the LHV export
    ·   idle       personal             -
 ```
 
-Blocked sessions float to the top. For a live view that redraws every 2s,
-run `~/.claude/warden/bin/warden cockpit` in its own Ghostty split.
+Rows are ranked by what needs a human first: escalated, then blocked, then
+stalled, then healthy work. A stalled row's clock counts **since the last sign of
+life**, not since the turn began. The cockpit derives that independently of the
+spinner, so a session whose animator died still reports the truth rather than
+cheerfully claiming to be working.
+
+For a live view that redraws every 2s, run `~/.claude/warden/bin/warden cockpit`
+in its own Ghostty split.
 
 ### Renaming a tab
 
@@ -121,7 +137,8 @@ background services beyond a tiny per-session spinner while a turn is active.
 
 ```
  UserPromptSubmit ─► working  ─► start spinner daemon ─┐
- PreToolUse       ─► activity glyph / resume-after-permission
+ PreToolUse       ─► activity glyph · beat · tool in flight
+ PostToolUse      ─► 🧠 thinking   · beat · flight cleared
  Notification     ─► ❓ needs you ─► start escalation timer
  Stop             ─► ✅ done      ─► stop daemons
                                    │
@@ -134,8 +151,19 @@ background services beyond a tiny per-session spinner while a turn is active.
 - The spinner reads a cheap per-session render file each frame (no `jq` in the
   hot loop) and resolves the terminal's real device (`/dev/ttysNNN`) so it can
   paint a tab even when that tab isn't focused.
+- **Progress is evidence, not a guess.** `PreToolUse` and `PostToolUse` touch a
+  per-session `.beat` file; `PreToolUse` also drops an `.inflight` marker that
+  `PostToolUse` removes. Stall detection reads those two mtimes and nothing else
+   — turn duration is never an input.
+- The spinner daemon owns everything that needs a clock (stall detection, the
+  context meter), because a hook runs on the critical path of a tool call and has
+  a 5-second timeout. It also self-heals: if the animator dies mid-turn, the next
+  tool call revives it.
 - On Ghostty/WezTerm it also emits an **OSC 9;4** native progress pulse on the
   focused tab; a no-op elsewhere.
+
+With `"spinner": false` there is no daemon, and therefore no stall detection and
+no mid-turn context refresh — the tab still shows state, activity, and label.
 
 ---
 
@@ -151,8 +179,12 @@ background services beyond a tiny per-session spinner while a turn is active.
 | `showProject` / `showActivity` / `showContext` | `true` | what rides the tab |
 | `escalateAfterSeconds` | `45` | needs-you → escalated threshold (`0` = off) |
 | `escalateReping` | `true` | re-ping the system sound on escalation |
-| `stuckAfterSeconds` / `stuck2AfterSeconds` | `300` / `900` | 🐢 / ⏳ thresholds |
+| `escalateMaxSeconds` | `3600` | stop nagging a session nobody ever came back to |
+| `stuckAfterSeconds` / `stuck2AfterSeconds` | `300` / `900` | 🐢 / ⏳ thresholds — seconds **since the last tool call or return**, not since the turn began |
+| `slowToolAfterSeconds` | `900` | how long one tool may run before ⏳ (catches a command hung on stdin) |
 | `contextWarnPercent` | `75` | only show the context meter past this |
+| `contextRefreshSeconds` | `15` | how often the daemon recomputes the context meter mid-turn |
+| `maxLifetimeSeconds` | `86400` | backstop for a session that crashed without emitting `Stop` — **not** a turn limit |
 | `glyphs.*` | see above | override any state glyph |
 | `projectLabelCommand` | — | a shell command (`$WARDEN_CWD`) printing a label |
 
@@ -179,10 +211,16 @@ Status bus schema:
 
 ```json
 { "id": "…", "state": "working|needs_you|done|idle",
+  "attention": "|stalled|stalled2|slow_tool|escalated",
   "project": "wunda", "activity": "🔧", "tty": "/dev/ttys003",
   "cwd": "…", "started": "1719582000", "prompt": "fix the …",
-  "ctx": "78", "needs_since": "", "updated": "1719582012" }
+  "ctx": "78", "needs_since": "", "transcript": "…", "updated": "1719582012" }
 ```
+
+`state` is what the session is doing; `attention` is whether it needs you. They
+are orthogonal — a `working` session can be `stalled`, and a `needs_you` session
+can be `escalated`. Both fire `on-state.sh`, so an extension sees a stalled
+session, not just whoever happens to be looking at that tab.
 
 ---
 

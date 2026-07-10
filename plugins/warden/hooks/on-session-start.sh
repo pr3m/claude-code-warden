@@ -48,7 +48,8 @@ warden_kill_pidfile "$(warden_escalate_pid "$ID")"
 # Session ids are unique, so bus files would otherwise accumulate forever.
 # Prune anything untouched for over a day, drop orphaned pidfiles whose process
 # is dead, and remove stale singleton locks. Cheap, self-healing, once/session.
-find "$(warden_sessions_dir)" -type f \( -name '*.json' -o -name '*.render' -o -name '*.owner' \) \
+find "$(warden_sessions_dir)" -type f \
+  \( -name '*.json' -o -name '*.render' -o -name '*.owner' -o -name '*.beat' -o -name '*.inflight' \) \
   -mtime +1 -delete 2>/dev/null || true
 for p in "$(warden_sessions_dir)"/*.pid; do
   [ -f "$p" ] || continue
@@ -59,9 +60,13 @@ for lk in "$(warden_sessions_dir)"/*.spinner.lock; do
   warden_pid_alive "${lk%.lock}.pid" || rmdir "$lk" 2>/dev/null || true
 done
 
+# A resumed session must not inherit a stale in-flight marker from the process
+# that died holding it — that would suppress stall detection for 15 minutes.
+warden_inflight_end "$ID"
+
 # Seed the bus as idle. We deliberately do NOT write a title here — Claude
 # Code sets its own title at startup; warden takes over on the first prompt.
-warden_render_write "$ID" "idle" "$PROJECT" "" ""
-warden_bus_write "$ID" "idle" "$PROJECT" "" "$TTY" "$CWD" "" "" "" ""
+warden_render_write "$ID" "idle" "$PROJECT" "" "" ""
+warden_bus_write "$ID" "idle" "$PROJECT" "" "$TTY" "$CWD" "" "" "" "" "" ""
 
 exit 0

@@ -24,10 +24,11 @@ trap 'exit 0' TERM INT HUP
 
 DELAY="$(warden_cfg '.escalateAfterSeconds' '45')"
 REPING="$(warden_cfg '.escalateReping' 'true')"
-# Self-reap bound (the spinner has one; without it a session that ends without
-# its Stop/Notification hook firing leaves this loop nagging a dead — or worse,
-# recycled — tty indefinitely).
-MAXLIFE="$(warden_cfg '.maxLifetimeSeconds' '7200')"
+# Self-reap bound: a session that ends without its Stop/Notification hook firing
+# would otherwise leave this loop nagging a dead — or worse, recycled — tty
+# indefinitely. This has its own key rather than sharing the spinner's lifetime
+# backstop, because that one is now a full day and this one makes a sound.
+MAXLIFE="$(warden_cfg '.escalateMaxSeconds' '3600')"
 START_TS="$(warden_now)"
 
 # Populated by still_waiting() from a single render read (avoids a second,
@@ -45,6 +46,7 @@ ping() {
   afplay /System/Library/Sounds/Glass.aiff >/dev/null 2>&1 &
 }
 
+PUBLISHED=0
 while :; do
   sleep "$DELAY"
   still_waiting || break
@@ -52,6 +54,16 @@ while :; do
   # stop nagging so we never ping/paint onto an unrelated tab.
   warden_owns_tty "$TTY" "$ID" || break
   [ "$(( $(warden_now) - START_TS ))" -ge "$MAXLIFE" ] 2>/dev/null && break
+
+  # Publish the escalation once, so the cockpit and the on-state extension can
+  # see it. Painting only the tab title made ‼️ invisible to every other surface.
+  if [ "$PUBLISHED" -eq 0 ]; then
+    PUBLISHED=1
+    warden_render_write "$ID" "needs_you" "$PROJECT" "" "$CTX" "escalated"
+    warden_bus_patch "$ID" attention "escalated"
+    warden_dispatch_state "$ID"
+  fi
+
   warden_write_title "$TTY" "$(warden_compose_title escalated "$PROJECT" "" "$CTX")"
   ping
 done

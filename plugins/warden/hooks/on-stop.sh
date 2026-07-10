@@ -25,13 +25,18 @@ if [ -f "$RENDER" ]; then IFS='|' read -r _s PROJECT _a _c _ < "$RENDER"; fi
 warden_kill_pidfile "$(warden_spinner_pid "$ID")"
 warden_kill_pidfile "$(warden_escalate_pid "$ID")"
 
+# The turn is over: nothing is in flight, and the heartbeat must not go stale
+# and make a finished session look stalled to the cockpit.
+warden_inflight_end "$ID"
+warden_beat "$ID"
+
 TRANSCRIPT="$(warden_payload_get '.transcript_path')"
 CTX="$(bash "$BIN_DIR/warden-context.sh" "$TRANSCRIPT" 2>/dev/null)"
 
-warden_render_write "$ID" "done" "$PROJECT" "" "$CTX"
+warden_render_write "$ID" "done" "$PROJECT" "" "$CTX" ""
 warden_write_title "$TTY" "$(warden_compose_title done "$PROJECT" "" "$CTX")"
 warden_write_progress "$TTY" 0 0
-warden_bus_write "$ID" "done" "$PROJECT" "" "$TTY" "$CWD" "" "" "$CTX" ""
+warden_bus_write "$ID" "done" "$PROJECT" "" "$TTY" "$CWD" "" "" "$CTX" "" "" "$TRANSCRIPT"
 warden_dispatch_state "$ID"
 
 exit 0

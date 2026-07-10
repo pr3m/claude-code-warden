@@ -32,10 +32,20 @@ warden_kill_pidfile "$(warden_spinner_pid "$ID")"
 warden_kill_pidfile "$(warden_escalate_pid "$ID")"
 NOW="$(warden_now)"
 
-warden_render_write "$ID" "needs_you" "$PROJECT" "" "$CTX"
+# Blocking on the user means no tool is executing — a permission prompt fires
+# before the tool runs. Leaving the marker set would suppress stall detection
+# for the whole time the session sits waiting.
+warden_inflight_end "$ID"
+
+STARTED="$(warden_bus_read "$ID" started)"
+PROMPT="$(warden_bus_read "$ID" prompt)"
+TRANSCRIPT="$(warden_bus_read "$ID" transcript)"
+
+warden_render_write "$ID" "needs_you" "$PROJECT" "" "$CTX" ""
 warden_write_title "$TTY" "$(warden_compose_title needs_you "$PROJECT" "" "$CTX")"
 warden_write_progress "$TTY" 2 100   # red/attention bar on terminals that support OSC 9;4
-warden_bus_write "$ID" "needs_you" "$PROJECT" "" "$TTY" "$CWD" "" "" "$CTX" "$NOW"
+warden_bus_write "$ID" "needs_you" "$PROJECT" "" "$TTY" "$CWD" \
+  "$STARTED" "$PROMPT" "$CTX" "$NOW" "" "$TRANSCRIPT"
 warden_dispatch_state "$ID"
 
 ESC="$(warden_cfg '.escalateAfterSeconds' '45')"

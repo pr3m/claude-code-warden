@@ -27,15 +27,18 @@ CTX="$(bash "$BIN_DIR/warden-context.sh" "$TRANSCRIPT" 2>/dev/null)"
 # A fresh turn supersedes any pending needs-you escalation.
 warden_kill_pidfile "$(warden_escalate_pid "$ID")"
 
-warden_render_write "$ID" "working" "$PROJECT" "🧠" "$CTX"
-warden_bus_write "$ID" "working" "$PROJECT" "🧠" "$TTY" "$CWD" "$STARTED" "$PROMPT" "$CTX" ""
+# Start the turn's progress heartbeat. Nothing is in flight yet — a leftover
+# marker from a killed turn would otherwise mask a stall for the next 15 min.
+warden_beat "$ID"
+warden_inflight_end "$ID"
+
+warden_render_write "$ID" "working" "$PROJECT" "🧠" "$CTX" ""
+warden_bus_write "$ID" "working" "$PROJECT" "🧠" "$TTY" "$CWD" "$STARTED" "$PROMPT" "$CTX" "" "" "$TRANSCRIPT"
 warden_dispatch_state "$ID"
 
 # Instant feedback before the spinner's first frame.
 warden_write_title "$TTY" "$(warden_compose_title working "$PROJECT" "🧠" "$CTX")"
 
-if [ "$(warden_cfg '.spinner' 'true')" = 'true' ] && ! warden_pid_alive "$(warden_spinner_pid "$ID")"; then
-  ( nohup bash "$BIN_DIR/spinner-daemon.sh" "$ID" "$TTY" >/dev/null 2>&1 & ) 2>/dev/null || true
-fi
+warden_spinner_ensure "$ID" "$TTY" "$BIN_DIR" || true
 
 exit 0

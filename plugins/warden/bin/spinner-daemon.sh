@@ -3,10 +3,16 @@
 # Launched by the UserPromptSubmit hook; killed by Notification/Stop hooks.
 #
 # Reads the cheap per-session render file every tick (no jq in the hot loop)
-# and writes an OSC 0 title frame to the resolved terminal device. Also owns
-# stuck-detection (🐢 / ⏳) since it's the loop that already tracks elapsed time.
+# and writes an OSC 0 title frame to the resolved terminal device.
 #
-# Usage: spinner-daemon.sh <session_id> <tty_device>
+# It also owns the two things that need a clock: attention detection (🐢 / ⏳)
+# and refreshing the context meter. Both are deliberately here rather than in a
+# hook — a hook has a 5s timeout and runs on the critical path of a tool call.
+#
+# Attention is derived from the progress heartbeat (warden_attention), NOT from
+# how long the turn has run. An agent may legitimately work for hours.
+#
+# Usage: spinner-daemon.sh <session_id> <tty_device> [transcript_path]
 
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,10 +21,12 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ID="${1:?session id required}"
 TTY="${2:?tty device required}"
+TRANSCRIPT="${3:-}"
+[ -n "$TRANSCRIPT" ] || TRANSCRIPT="$(warden_bus_read "$ID" transcript)"
 
 RENDER="$(warden_render_file "$ID")"
 PIDFILE="$(warden_spinner_pid "$ID")"
-LOCK="${PIDFILE%.pid}.lock"
+LOCK="$(warden_spinner_lock "$ID")"
 
 warden_ensure_dirs
 # Atomic singleton: mkdir succeeds for exactly one process. A racing second
@@ -37,17 +45,23 @@ trap 'exit 0' TERM INT HUP
 INTERVAL_MS="$(warden_cfg '.spinnerIntervalMs' '120')"
 STUCK="$(warden_cfg '.stuckAfterSeconds' '300')"
 STUCK2="$(warden_cfg '.stuck2AfterSeconds' '900')"
+SLOW="$(warden_cfg '.slowToolAfterSeconds' '900')"
 SHOW_ACTIVITY="$(warden_cfg '.showActivity' 'true')"
 SHOW_PROJECT="$(warden_cfg '.showProject' 'true')"
 SHOW_CONTEXT="$(warden_cfg '.showContext' 'true')"
 CTX_WARN="$(warden_cfg '.contextWarnPercent' '75')"
-STUCK_GLYPH="$(warden_state_glyph stuck)"
-STUCK2_GLYPH="$(warden_state_glyph stuck2)"
-MAXLIFE="$(warden_cfg '.maxLifetimeSeconds' '7200')"
+CTX_REFRESH="$(warden_cfg '.contextRefreshSeconds' '15')"
+# A backstop for a session that crashed without emitting Stop — NOT a turn
+# limit. Turns may legitimately run for hours; if this ever trips on a live
+# turn, the next tool call revives us via warden_spinner_ensure.
+MAXLIFE="$(warden_cfg '.maxLifetimeSeconds' '86400')"
 
 # LC_ALL=C so the fractional seconds use a dot, not a locale decimal comma
 # (which would make `sleep 0,120` invalid → error → busy loop).
 SLEEP_S="$(LC_ALL=C awk -v m="$INTERVAL_MS" 'BEGIN { s = m / 1000; if (s < 0.04) s = 0.04; printf "%.3f", s }')"
+# Attention/context are re-evaluated about once a second, not once per frame —
+# a `stat` per 120ms frame would be 8 forks/sec for state that changes slowly.
+TICKS_PER_SEC="$(LC_ALL=C awk -v m="$INTERVAL_MS" 'BEGIN { t = int(1000 / m); if (t < 1) t = 1; printf "%d", t }')"
 
 # --- Frames: prefer the JSON array; fall back to a baked-in braille set ---
 FRAMES=()
@@ -63,6 +77,10 @@ NFRAMES="${#FRAMES[@]}"
 
 START_TS="$(warden_now)"
 i=0
+tick=0
+ATT=""          # last published attention marker
+ATT_GLYPH=""
+CTX_TS=0        # epoch of the last context recompute
 
 # Native progress pulse for terminals that support OSC 9;4 (Ghostty/WezTerm).
 warden_write_progress "$TTY" 3 0
@@ -76,24 +94,62 @@ while :; do
   line="$(cat "$RENDER" 2>/dev/null)"
   # Tolerate a transient empty read during an atomic rewrite — retry next tick.
   [ -n "$line" ] || { sleep "$SLEEP_S"; continue; }
-  IFS='|' read -r r_state r_project r_activity r_ctx _ <<< "$line"
+  IFS='|' read -r r_state r_project r_activity r_ctx _r_att <<< "$line"
   [ "$r_state" = "working" ] || break
 
-  elapsed=$(( $(warden_now) - START_TS ))
+  now="$(warden_now)"
 
-  # Self-reap on absurdly long runs (e.g. a crashed session whose Stop hook
-  # never fired) so we never animate a dead tab indefinitely.
-  [ "$elapsed" -ge "$MAXLIFE" ] 2>/dev/null && break
+  # Self-reap on an absurdly long run (a crashed session whose Stop hook never
+  # fired). Harmless on a live turn: the next tool call relaunches us.
+  [ "$((now - START_TS))" -ge "$MAXLIFE" ] 2>/dev/null && break
 
-  # Lead = spinner frame, with a stuck marker prepended once it's been a while.
-  frame="${FRAMES[$i]}"
-  if [ "$elapsed" -ge "$STUCK2" ] 2>/dev/null; then
-    lead="$STUCK2_GLYPH $frame"
-  elif [ "$elapsed" -ge "$STUCK" ] 2>/dev/null; then
-    lead="$STUCK_GLYPH $frame"
-  else
-    lead="$frame"
+  if [ "$((tick % TICKS_PER_SEC))" -eq 0 ]; then
+    att_changed=0; ctx_changed=0
+
+    # --- Attention: is anything actually happening? -----------------------
+    att="$(warden_attention "$ID" "$SLOW" "$STUCK" "$STUCK2")"
+    if [ "$att" != "$ATT" ]; then
+      ATT="$att"
+      ATT_GLYPH=""
+      [ -n "$ATT" ] && ATT_GLYPH="$(warden_state_glyph "$ATT")"
+      att_changed=1
+    fi
+
+    # --- Context meter: recompute mid-turn --------------------------------
+    # The value seeded at prompt-submit is already wrong by the time it matters;
+    # a turn that crosses the warn threshold must actually say so.
+    if [ -n "$TRANSCRIPT" ] && [ "$((now - CTX_TS))" -ge "$CTX_REFRESH" ] 2>/dev/null; then
+      CTX_TS="$now"
+      fresh="$(bash "$DIR/warden-context.sh" "$TRANSCRIPT" 2>/dev/null)"
+      if [ -n "$fresh" ] && [ "$fresh" != "$r_ctx" ]; then
+        r_ctx="$fresh"
+        ctx_changed=1
+      fi
+    fi
+
+    # Publish, so the cockpit and the on-state extension see a stalled session
+    # too — not just whoever happens to be looking at this one tab.
+    if [ "$att_changed" -eq 1 ] || [ "$ctx_changed" -eq 1 ]; then
+      # Re-read immediately before writing: a PreToolUse may have landed a new
+      # activity glyph since our tick began, and a blind write-back of the line
+      # we read ~1s ago would silently revert it.
+      cur="$(cat "$RENDER" 2>/dev/null)"
+      if [ -n "$cur" ]; then
+        IFS='|' read -r c_state c_project c_activity _c_ctx _c_att <<< "$cur"
+        if [ "$c_state" = "working" ]; then
+          r_project="$c_project"; r_activity="$c_activity"
+          warden_render_write "$ID" "working" "$c_project" "$c_activity" "$r_ctx" "$ATT"
+        fi
+      fi
+      [ "$att_changed" -eq 1 ] && warden_bus_patch "$ID" attention "$ATT"
+      [ "$ctx_changed" -eq 1 ] && warden_bus_patch "$ID" ctx "$r_ctx"
+      [ "$att_changed" -eq 1 ] && warden_dispatch_state "$ID"
+    fi
   fi
+
+  # Lead = spinner frame, with the attention marker prepended when one is live.
+  frame="${FRAMES[$i]}"
+  if [ -n "$ATT_GLYPH" ]; then lead="$ATT_GLYPH $frame"; else lead="$frame"; fi
 
   title="$lead"
   [ "$SHOW_ACTIVITY" = "true" ] && [ -n "$r_activity" ] && title="$title $r_activity"
@@ -107,6 +163,7 @@ while :; do
   warden_write_title "$TTY" "$title"
 
   i=$(( (i + 1) % NFRAMES ))
+  tick=$(( tick + 1 ))
   sleep "$SLEEP_S"
 done
 

@@ -30,12 +30,89 @@ warden_log_file()     { printf '%s\n' "$HOME/.claude/warden/warden.log"; }
 warden_session_file()  { printf '%s/%s.json\n'         "$(warden_sessions_dir)" "$1"; }
 warden_render_file()   { printf '%s/%s.render\n'       "$(warden_sessions_dir)" "$1"; }
 warden_spinner_pid()   { printf '%s/%s.spinner.pid\n'  "$(warden_sessions_dir)" "$1"; }
+warden_spinner_lock()  { printf '%s/%s.spinner.lock\n' "$(warden_sessions_dir)" "$1"; }
 warden_escalate_pid()  { printf '%s/%s.escalate.pid\n' "$(warden_sessions_dir)" "$1"; }
+# Progress heartbeat: touched on every tool START and every tool END. Its mtime
+# is the ONLY evidence warden has that a turn is advancing. Deliberately a file
+# of its own rather than the render file — the spinner daemon writes the render
+# file (attention, live context), and would otherwise forge its own heartbeat.
+warden_beat_file()     { printf '%s/%s.beat\n'         "$(warden_sessions_dir)" "$1"; }
+# Present exactly while a tool is executing; its mtime is that tool's start time.
+# Distinguishes "one slow operation" from "the agent has stopped doing anything".
+warden_inflight_file() { printf '%s/%s.inflight\n'     "$(warden_sessions_dir)" "$1"; }
 
 warden_ensure_dirs() { mkdir -p "$(warden_sessions_dir)"; }
 
-warden_now() { date +%s; }
+# $WARDEN_NOW pins the clock (tests only) so time-dependent logic is assertable.
+warden_now() { printf '%s\n' "${WARDEN_NOW:-$(date +%s)}"; }
 warden_now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# stat(1) is not portable: BSD wants -f%m, GNU wants -c%Y, and each *succeeds
+# with wrong output* when handed the other's flag. Resolve once, at source time.
+case "$(uname -s)" in
+  Darwin|*BSD*) WARDEN_STAT_MTIME='-f%m' ;;
+  *)            WARDEN_STAT_MTIME='-c%Y' ;;
+esac
+
+# Epoch mtime of a file/dir; empty (and non-zero) if it doesn't exist.
+warden_mtime() {
+  [ -e "${1:-}" ] || return 1
+  stat "$WARDEN_STAT_MTIME" "$1" 2>/dev/null
+}
+
+# --- Progress heartbeat + in-flight tracking -------------------------------
+
+warden_beat() {
+  warden_ensure_dirs
+  : > "$(warden_beat_file "$1")" 2>/dev/null || true
+}
+
+warden_inflight_begin() {
+  warden_ensure_dirs
+  : > "$(warden_inflight_file "$1")" 2>/dev/null || true
+}
+
+warden_inflight_end() {
+  rm -f "$(warden_inflight_file "$1")" 2>/dev/null || true
+}
+
+# warden_attention <id> [slow] [stuck] [stuck2] — the single rule that decides
+# whether a working session deserves a marker. Both renderers (the spinner
+# daemon painting a tab, the cockpit painting the fleet) call THIS, so the two
+# surfaces can never disagree. Prints one of: "" | slow_tool | stalled | stalled2
+#
+# Turn duration is deliberately not an input. An agent can legitimately work for
+# hours; what matters is whether anything is happening. A tool that is genuinely
+# executing suppresses the stall markers — but not forever, because a command
+# blocked on stdin would otherwise hide behind "a tool is running" indefinitely.
+warden_attention() {
+  local id="$1" slow="${2:-}" stuck="${3:-}" stuck2="${4:-}" now t age
+  [ -n "$slow" ]   || slow="$(warden_cfg '.slowToolAfterSeconds' '900')"
+  [ -n "$stuck" ]  || stuck="$(warden_cfg '.stuckAfterSeconds' '300')"
+  [ -n "$stuck2" ] || stuck2="$(warden_cfg '.stuck2AfterSeconds' '900')"
+  now="$(warden_now)"
+
+  if t="$(warden_mtime "$(warden_inflight_file "$id")")" && [ -n "$t" ]; then
+    age=$((now - t))
+    [ "$age" -ge "$slow" ] 2>/dev/null && printf 'slow_tool\n'
+    return 0
+  fi
+
+  t="$(warden_mtime "$(warden_beat_file "$id")")" || return 0
+  [ -n "$t" ] || return 0
+  age=$((now - t))
+  if   [ "$age" -ge "$stuck2" ] 2>/dev/null; then printf 'stalled2\n'
+  elif [ "$age" -ge "$stuck"  ] 2>/dev/null; then printf 'stalled\n'
+  fi
+  return 0
+}
+
+# Seconds since the last progress event (tool start or tool end). Empty if never.
+warden_idle_age() {
+  local t; t="$(warden_mtime "$(warden_beat_file "$1")")" || return 0
+  [ -n "$t" ] || return 0
+  printf '%s\n' "$(($(warden_now) - t))"
+}
 
 warden_log() {
   warden_ensure_dirs
@@ -228,7 +305,7 @@ warden_owns_tty() {
 # the render project (a running spinner picks it up next tick), the bus project
 # (cockpit), and repaint a static title (so idle/done/needs_you update at once).
 warden_relabel_tty() {
-  local tty="$1" f id cwd proj rf rs rp ra rc
+  local tty="$1" f id cwd proj rf rs rp ra rc ratt
   [ -n "$tty" ] || return 0
   warden_has_jq || return 0   # need jq to find sessions by tty + patch the bus
   for f in "$(warden_sessions_dir)"/*.json; do
@@ -237,11 +314,13 @@ warden_relabel_tty() {
     id="$(jq -r '.id // ""' "$f" 2>/dev/null)"; [ -n "$id" ] || continue
     cwd="$(jq -r '.cwd // ""' "$f" 2>/dev/null)"
     proj="$(warden_label_for "$tty" "$cwd")"
-    rs="idle"; ra=""; rc=""
+    rs="idle"; ra=""; rc=""; ratt=""
     rf="$(warden_render_file "$id")"
-    [ -f "$rf" ] && { IFS='|' read -r rs rp ra rc _ < "$rf" 2>/dev/null || true; }
+    # Carry the attention marker through: renaming a tab must not quietly clear
+    # a session's stalled/escalated state.
+    [ -f "$rf" ] && { IFS='|' read -r rs rp ra rc ratt < "$rf" 2>/dev/null || true; }
     [ -n "$rs" ] || rs="$(jq -r '.state // "idle"' "$f" 2>/dev/null)"
-    warden_render_write "$id" "$rs" "$proj" "$ra" "$rc"
+    warden_render_write "$id" "$rs" "$proj" "$ra" "$rc" "$ratt"
     jq --arg p "$proj" '.project=$p' "$f" > "$f.$$.tmp" 2>/dev/null \
       && mv -f "$f.$$.tmp" "$f" 2>/dev/null || rm -f "$f.$$.tmp" 2>/dev/null
     warden_write_title "$tty" "$(warden_compose_title "$rs" "$proj" "$ra" "$rc")"
@@ -277,11 +356,14 @@ warden_default_config() {
   "showContext": true,
   "escalateAfterSeconds": 45,
   "escalateReping": true,
+  "escalateMaxSeconds": 3600,
   "stuckAfterSeconds": 300,
   "stuck2AfterSeconds": 900,
+  "slowToolAfterSeconds": 900,
   "contextWarnPercent": 75,
+  "contextRefreshSeconds": 15,
   "staleDisplaySeconds": 86400,
-  "maxLifetimeSeconds": 7200,
+  "maxLifetimeSeconds": 86400,
   "glyphs": {
     "working": "⚙",
     "needs_you": "❓",
@@ -289,8 +371,7 @@ warden_default_config() {
     "stuck": "🐢",
     "stuck2": "⏳",
     "done": "✅",
-    "idle": "·",
-    "error": "🔴"
+    "idle": "·"
   }
 }
 JSON
@@ -318,41 +399,94 @@ warden_cfg() {
 # Glyphs — state and activity. Config can override the state set via .glyphs.*
 # ---------------------------------------------------------------------------
 
+# Accepts both a session state (working/needs_you/done/idle) and an attention
+# marker (stalled/stalled2/slow_tool/escalated), so one call site renders either.
+# slow_tool and stalled2 intentionally share ⏳: both mean "this has been going
+# nowhere for a long time" — one inside a tool, one outside it.
 warden_state_glyph() {
   case "$1" in
-    working)   warden_cfg '.glyphs.working'   '⚙' ;;
-    needs_you) warden_cfg '.glyphs.needs_you' '❓' ;;
-    escalated) warden_cfg '.glyphs.escalated' '‼️' ;;
-    stuck)     warden_cfg '.glyphs.stuck'     '🐢' ;;
-    stuck2)    warden_cfg '.glyphs.stuck2'    '⏳' ;;
-    done)      warden_cfg '.glyphs.done'      '✅' ;;
-    error)     warden_cfg '.glyphs.error'     '🔴' ;;
-    *)         warden_cfg '.glyphs.idle'      '·' ;;
+    working)            warden_cfg '.glyphs.working'   '⚙' ;;
+    needs_you)          warden_cfg '.glyphs.needs_you' '❓' ;;
+    escalated)          warden_cfg '.glyphs.escalated' '‼️' ;;
+    stalled|stuck)      warden_cfg '.glyphs.stuck'     '🐢' ;;
+    stalled2|stuck2|slow_tool) warden_cfg '.glyphs.stuck2' '⏳' ;;
+    done)               warden_cfg '.glyphs.done'      '✅' ;;
+    *)                  warden_cfg '.glyphs.idle'      '·' ;;
   esac
 }
 
-# Map a Claude Code tool name to a compact activity glyph.
+# Map a Claude Code tool name to a compact activity glyph. The fallback is a
+# neutral dot, NOT the Bash wrench — an unrecognised tool must not claim to be
+# running a shell command.
 warden_activity_glyph() {
   case "$1" in
-    Bash)                 printf '🔧\n' ;;
-    Read|NotebookRead)    printf '📖\n' ;;
+    Bash)                              printf '🔧\n' ;;
+    Read|NotebookRead)                 printf '📖\n' ;;
     Edit|Write|NotebookEdit|MultiEdit) printf '✏️\n' ;;
-    Grep|Glob)            printf '🔎\n' ;;
-    WebSearch|WebFetch)   printf '🌐\n' ;;
-    Task|Agent)           printf '🤖\n' ;;
-    TodoWrite)            printf '🗒️\n' ;;
-    *mcp*|mcp__*)         printf '🔌\n' ;;
-    *)                    printf '🔧\n' ;;
+    Grep|Glob)                         printf '🔎\n' ;;
+    WebSearch|WebFetch)                printf '🌐\n' ;;
+    Task|Agent)                        printf '🤖\n' ;;
+    TodoWrite|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop) printf '🗒️\n' ;;
+    Skill)                             printf '⚡\n' ;;
+    Workflow)                          printf '🏗\n' ;;
+    Artifact)                          printf '🎨\n' ;;
+    AskUserQuestion)                   printf '💬\n' ;;
+    EnterPlanMode|ExitPlanMode)        printf '📋\n' ;;
+    SendMessage)                       printf '📨\n' ;;
+    ToolSearch)                        printf '🧰\n' ;;
+    Monitor)                           printf '👁\n' ;;
+    mcp__*|*mcp*)                      printf '🔌\n' ;;
+    *)                                 printf '•\n' ;;
   esac
 }
 
-# Heuristic: label a test-runner bash command so the tab can show 🧪.
-warden_is_test_command() {
-  case "$1" in
-    *"npm test"*|*"npm run test"*|*"mocha"*|*vitest*|*jest*|*pytest*|*"go test"*|*"cargo test"*|*"npm run lint"*)
-      return 0 ;;
-  esac
-  return 1
+# Classify a bash command as a test or lint run, so the tab can show 🧪 / 🧹.
+# Prints "test", "lint", or nothing.
+#
+# Only text at COMMAND POSITION counts — the start of the string, or just after
+# a shell operator. A naive substring match reads `git commit -m "fix npm test"`
+# as a test run. We split on ; | & (which turns && and || into empty segments,
+# harmlessly) and inspect each segment's first real word.
+warden_cmd_kind() {
+  local seg first kind=""
+  while IFS= read -r seg; do
+    # Strip leading whitespace, env assignments, and transparent wrappers until
+    # the first token is the actual program being run. Every strip requires a
+    # space to consume, so the loop always shrinks `seg` and terminates.
+    while :; do
+      seg="${seg#"${seg%%[![:space:]]*}"}"
+      case "$seg" in *\ *) : ;; *) break ;; esac
+      first="${seg%% *}"
+      # An env assignment must have its `=` in the FIRST word — a naive
+      # `[A-Za-z_]*=*\ *` glob also eats `npm test --foo=bar`.
+      case "$first" in
+        [A-Za-z_]*=*) seg="${seg#* }"; continue ;;
+      esac
+      case "$first" in
+        sudo|env|time|nice|npx|bunx) seg="${seg#* }"; continue ;;
+      esac
+      case "$seg" in
+        pnpm\ exec\ *) seg="${seg#pnpm exec }"; continue ;;
+      esac
+      break
+    done
+    case "$seg" in
+      npm\ run\ lint*|npm\ run\ format*|pnpm\ lint*|yarn\ lint*|eslint*|prettier*|ruff*|shellcheck*|golangci-lint*)
+        kind="lint" ;;
+      npm\ t|npm\ t\ *|npm\ test*|npm\ run\ test*|pnpm\ test*|pnpm\ run\ test*|yarn\ test*|bun\ test*)
+        kind="test" ;;
+      mocha*|vitest*|jest*|pytest*|rspec*|phpunit*|tox*|ctest*)
+        kind="test" ;;
+      go\ test*|cargo\ test*|make\ test*|mvn\ test*|gradle\ test*|dotnet\ test*)
+        kind="test" ;;
+    esac
+    # A test anywhere in the pipeline wins over a lint (`lint && test`).
+    [ "$kind" = "test" ] && break
+  done <<EOF
+$(printf '%s' "${1:-}" | tr ';|&' '\n\n\n')
+EOF
+  [ -n "$kind" ] && printf '%s\n' "$kind"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -391,14 +525,14 @@ warden_write_progress() {
 # ---------------------------------------------------------------------------
 
 warden_render_write() {
-  # $1 id  $2 state  $3 project  $4 activity_glyph  $5 ctx_pct
+  # $1 id  $2 state  $3 project  $4 activity_glyph  $5 ctx_pct  $6 attention
   # Atomic (temp + rename) so the spinner daemon never reads a truncated line
   # mid-rewrite.
   warden_ensure_dirs
   local f tmp
   f="$(warden_render_file "$1")"
   tmp="${f}.$$.tmp"
-  printf '%s|%s|%s|%s|%s\n' "$2" "$3" "$4" "${5:-}" "" > "$tmp" 2>/dev/null \
+  printf '%s|%s|%s|%s|%s\n' "$2" "$3" "$4" "${5:-}" "${6:-}" > "$tmp" 2>/dev/null \
     && mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 }
 
@@ -423,9 +557,10 @@ warden_compose_title() {
 # ---------------------------------------------------------------------------
 
 warden_bus_write() {
-  # named via env for clarity: id state project activity tty cwd started prompt ctx needs_since
+  # named via env for clarity: id state project activity tty cwd started prompt ctx needs_since attention transcript
   local id="$1" state="$2" project="$3" activity="$4" tty="$5" cwd="$6" \
-        started="$7" prompt="$8" ctx="${9:-}" needs_since="${10:-}"
+        started="$7" prompt="$8" ctx="${9:-}" needs_since="${10:-}" \
+        attention="${11:-}" transcript="${12:-}"
   warden_ensure_dirs
   local f tmp; f="$(warden_session_file "$id")"; tmp="${f}.$$.tmp"
   if warden_has_jq; then
@@ -434,9 +569,11 @@ warden_bus_write() {
       --arg activity "$activity" --arg tty "$tty" --arg cwd "$cwd" \
       --arg started "$started" --arg prompt "$prompt" --arg ctx "$ctx" \
       --arg needs "$needs_since" --arg updated "$(warden_now)" \
+      --arg attention "$attention" --arg transcript "$transcript" \
       '{id:$id,state:$state,project:$project,activity:$activity,tty:$tty,
         cwd:$cwd,started:$started,prompt:$prompt,ctx:$ctx,
-        needs_since:$needs,updated:$updated}' > "$tmp" 2>/dev/null \
+        needs_since:$needs,attention:$attention,transcript:$transcript,
+        updated:$updated}' > "$tmp" 2>/dev/null \
       && mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null
   else
     # jq-absent fallback: escape backslash and double-quote so the hand-built
@@ -446,6 +583,30 @@ warden_bus_write() {
       "$id" "$state" "$pe" "$tty" "$(warden_now)" > "$tmp" \
       && mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null
   fi
+}
+
+# warden_bus_patch <id> <key> <value> [<key> <value> ...] — merge fields into an
+# existing bus file. The long-lived daemons use this to publish live context and
+# attention without clobbering fields they don't own (started, prompt, cwd).
+warden_bus_patch() {
+  local id="$1"; shift
+  warden_has_jq || return 0
+  local f tmp filter i k v
+  f="$(warden_session_file "$id")"
+  [ -f "$f" ] || return 0
+  tmp="${f}.$$.tmp"
+  local -a jqargs
+  jqargs=(--arg updated "$(warden_now)")
+  filter='.updated=$updated'
+  i=0
+  while [ "$#" -ge 2 ]; do
+    k="$1"; v="$2"; shift 2
+    i=$((i + 1))
+    jqargs+=(--arg "k$i" "$k" --arg "v$i" "$v")
+    filter="$filter | .[\$k$i]=\$v$i"
+  done
+  jq "${jqargs[@]}" "$filter" "$f" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 }
 
 # Read one field from a session bus file (jq path without leading dot).
@@ -482,6 +643,38 @@ warden_pid_alive() {
   [ -f "$f" ] || return 1
   pid="$(cat "$f" 2>/dev/null)"
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# The spinner's singleton lock is an mkdir, released by its EXIT trap. A SIGKILL
+# (or an OOM) leaves it behind, and nothing could then start a spinner for that
+# session until the next SessionStart swept it. Clear it here too.
+#
+# The age guard is load-bearing: a daemon that launched milliseconds ago holds
+# the lock but has not written its pidfile yet, so `pid_alive` is false for it.
+# Without the guard we would rmdir a LIVE daemon's lock and let a second animator
+# in — two processes writing offset frames to one tab.
+warden_clear_stale_spinner_lock() {
+  local id="$1" lk t
+  lk="$(warden_spinner_lock "$id")"
+  [ -d "$lk" ] || return 0
+  warden_pid_alive "$(warden_spinner_pid "$id")" && return 0
+  t="$(warden_mtime "$lk")" || return 0
+  [ -n "$t" ] || return 0
+  [ "$(($(warden_now) - t))" -ge 10 ] 2>/dev/null || return 0
+  rmdir "$lk" 2>/dev/null || true
+  rm -f "$(warden_spinner_pid "$id")" 2>/dev/null || true
+}
+
+# Idempotent spinner launch. Safe to call on every tool call: it no-ops when the
+# animator is alive, and the daemon's own mkdir singleton rejects any duplicate
+# that races through. This is what revives a tab whose daemon died mid-turn.
+warden_spinner_ensure() {
+  local id="$1" tty="$2" bin="$3"
+  [ "$(warden_cfg '.spinner' 'true')" = 'true' ] || return 1
+  warden_pid_alive "$(warden_spinner_pid "$id")" && return 0
+  warden_clear_stale_spinner_lock "$id"
+  ( nohup bash "$bin/spinner-daemon.sh" "$id" "$tty" >/dev/null 2>&1 & ) 2>/dev/null || true
+  return 0
 }
 
 # Like warden_kill_pidfile, but only signals a process whose command still looks

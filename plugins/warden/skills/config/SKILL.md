@@ -16,10 +16,13 @@ file directly (or `~/.claude/warden/bin/warden config edit`). Keys:
 
 - `spinner`, `spinnerFrames` (array), `spinnerIntervalMs`
 - `showProject`, `showActivity`, `showContext`
-- `escalateAfterSeconds`, `escalateReping`
-- `stuckAfterSeconds`, `stuck2AfterSeconds`
-- `contextWarnPercent`
-- `glyphs.{working,needs_you,escalated,stuck,stuck2,done,idle,error}`
+- `escalateAfterSeconds`, `escalateReping`, `escalateMaxSeconds`
+- `stuckAfterSeconds`, `stuck2AfterSeconds` — seconds since the last tool call or
+  return (a progress heartbeat), **not** since the turn started
+- `slowToolAfterSeconds` — how long a single tool may run before ⏳
+- `contextWarnPercent`, `contextRefreshSeconds`
+- `maxLifetimeSeconds` — crash backstop for the spinner daemon, not a turn limit
+- `glyphs.{working,needs_you,escalated,stuck,stuck2,done,idle}`
 - `projectLabelCommand` — a shell command (cwd in `$WARDEN_CWD`) that prints a
   custom project label; overridden by `~/.claude/warden/ext/project-label.sh`.
 

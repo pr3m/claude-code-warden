@@ -3,6 +3,88 @@
 All notable changes to **warden** are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.2.0] — unreleased
+
+An audit of every indicator warden paints, against what it can actually observe.
+Four of them were lying. The root cause was shared: warden knew when a turn
+*started* and nothing about whether it was making progress.
+
+### Changed (behaviour)
+- **`🐢` / `⏳` now measure progress, not turn duration.** They were computed from
+  `now - turn_start`, so *any* turn past five minutes was flagged — which for an
+  agentic session is most of them. warden now beats a heartbeat (`<id>.beat`) on
+  every tool call and every tool return, and the markers fire on silence. An agent
+  can work for hours without tripping them.
+- **A running tool is no longer mistaken for a stall.** A new `PostToolUse` hook
+  maintains an `<id>.inflight` marker, so a 20-minute test suite reads as slow
+  rather than stuck. It does not suppress forever: a single tool still raises `⏳`
+  after `slowToolAfterSeconds`, because a command blocked on stdin would otherwise
+  hide behind "a tool is running" indefinitely.
+- **`maxLifetimeSeconds` 7200 → 86400**, and it is documented as a crash backstop
+  rather than a turn limit. It is now harmless either way: a dead animator is
+  revived by the next tool call.
+- **Removed the `🔴 error` state.** No hook ever set it — warden has no error
+  detection. It advertised a capability that did not exist. `glyphs.error` is
+  ignored; the cockpit no longer counts a bogus state as `idle`.
+- Cockpit header now counts `stalled` sessions, and rows rank by urgency:
+  escalated → needs you → stalled → slow op → working → done → idle.
+
+### Fixed
+- **The cockpit could never show `🐢`, `⏳`, or `‼️`.** Only four states ever
+  reached the render file or the status bus; stall and escalation were painted
+  straight to a tab title and existed nowhere else. The fleet view — the entire
+  triage surface — rendered a stalled session as `⚙ working`. Both are now
+  published to the bus as an `attention` field and dispatched to `on-state.sh`.
+  The cockpit *derives* attention independently, so a session whose spinner daemon
+  died still reports the truth.
+- **The context meter was frozen for the whole turn.** It was computed once at
+  `UserPromptSubmit` and not again until `Stop`, while `PreToolUse` merely copied
+  the stale value forward. Because the meter only renders past
+  `contextWarnPercent`, a turn that began at 45% and climbed to 90% displayed
+  *nothing* — the warning was structurally incapable of firing on the turn that
+  triggered it. The daemon now recomputes it every `contextRefreshSeconds`.
+- **A long turn froze the tab.** The spinner daemon self-reaped at 2h, and the
+  relaunch path only ran when resuming from a permission prompt — so the tab sat
+  on its last braille frame, indistinguishable from a hang. `PreToolUse` now
+  revives a dead animator on any tool call, with a stale-lock sweep guarded by an
+  age check so a daemon still writing its pidfile is never displaced by a second.
+- **The activity glyph claimed the wrong tool.** With no `PostToolUse` hook it
+  showed the last tool *started*, so it read `📖` through a long think after a
+  Read. It now returns to `🧠` when nothing is running.
+- **Unknown tools impersonated Bash.** The fallback glyph was `🔧`, identical to
+  Bash, so `Skill`, `Workflow`, `Artifact`, `AskUserQuestion`, `SendMessage` and
+  the `Task*` family all read as "running a shell command". The fallback is now a
+  neutral `•`, and the tool map covers the current tool set.
+- **`🧪` fired on things that were not tests.** It substring-matched, so
+  `git commit -m "fix npm test"` showed a test glyph, and `npm run lint` counted
+  as a test. Matching is now anchored to command position (`sudo`, `npx` and env
+  assignments are seen through), lint gets its own `🧹`, and pnpm/yarn/bun/make/
+  mvn/gradle/dotnet/rspec runners are recognised.
+- **The cockpit printed a raw epoch instead of a wait time for every blocked
+  session.** It read the status bus as tab-separated fields, but `read` collapses
+  runs of a *whitespace* `IFS` into one delimiter — so a `needs_you` row (empty
+  activity, started, ctx and prompt) had its fields shift left and rendered
+  `needs_since` in the activity column, losing both the wait time and the prompt.
+  Fields are now read one per line. (A non-whitespace separator is no escape:
+  bash silently refuses to split on `\001`, though zsh will.)
+- **The cockpit's elapsed clock restarted at every permission prompt** — the
+  resume path stamped `started` with the current time. It is preserved now, and a
+  stalled row counts from the last sign of life instead.
+- Renaming a tab (`warden label`) silently cleared a session's attention marker,
+  because `warden_relabel_tty` rewrote the render line without its last field.
+- With `"spinner": false`, the red `OSC 9;4` bar raised by a Notification was
+  never cleared when work resumed; only the spinner reset it.
+- `escalateMaxSeconds` (1h) split out from `maxLifetimeSeconds`, so raising the
+  spinner's backstop to a day does not leave an escalation daemon chiming for 24h.
+
+### Added
+- `PostToolUse` hook (`hooks/on-posttool.sh`).
+- `plugins/warden/test/stall-logic.sh` and `test/hook-flow.sh` — 71 assertions
+  covering attention thresholds at their exact boundaries (on a pinned clock),
+  the command classifier, glyph mapping, the in-flight lifecycle across a full
+  turn, spinner self-heal, the singleton holding under a launch storm, the
+  mid-turn context refresh, and the cockpit's field alignment.
+
 ## [0.1.5] — unreleased
 
 ### Fixed

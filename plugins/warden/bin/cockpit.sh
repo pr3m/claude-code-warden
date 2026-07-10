@@ -25,11 +25,17 @@ dur() {
 }
 
 render() {
-  local dir now working needs done idle rows
+  local dir now working needs done idle stalled rows
   dir="$(warden_sessions_dir)"
   now="$(warden_now)"
-  working=0; needs=0; ndone=0; idle=0; rows=""
-  local stale; stale="$(warden_cfg '.staleDisplaySeconds' '86400')"
+  working=0; needs=0; ndone=0; idle=0; stalled=0; rows=""
+  local stale slow stuck stuck2
+  stale="$(warden_cfg '.staleDisplaySeconds' '86400')"
+  # Read the attention thresholds once, then pass them down — warden_attention
+  # would otherwise shell out to jq three times per session per redraw.
+  slow="$(warden_cfg '.slowToolAfterSeconds' '900')"
+  stuck="$(warden_cfg '.stuckAfterSeconds' '300')"
+  stuck2="$(warden_cfg '.stuck2AfterSeconds' '900')"
 
   if ! warden_has_jq; then
     printf 'warden cockpit needs jq to read the status bus. Install jq and retry.\n'
@@ -39,10 +45,22 @@ render() {
   shopt -s nullglob 2>/dev/null || true
   for f in "$dir"/*.json; do
     local id state project activity started needs_since prompt ctx updated rf el k ctxs line
+    local ratt att label idle_age
     # One jq spawn per file instead of nine — at 20 sessions × 2s that's the
     # difference between 10 and 90 jq processes per redraw.
-    line="$(jq -r '[.id, .updated, .state, .project, .activity, .started, .needs_since, .ctx, .prompt] | map(. // "") | @tsv' "$f" 2>/dev/null)"
-    IFS=$'\t' read -r id updated state project activity started needs_since ctx prompt <<< "$line"
+    #
+    # One field per LINE, not a \t-separated row. `read` collapses runs of a
+    # *whitespace* IFS into a single delimiter, so a blocked session (empty
+    # activity/started/prompt) had its fields shift left and printed a raw epoch
+    # where its wait time belonged. A non-whitespace IFS is no escape either:
+    # bash will not split on \001 (zsh will, which is how this stayed hidden).
+    # Every field below is already stripped of control characters by
+    # warden_strip_controls, so a newline cannot occur inside one.
+    line="$(jq -r '[.id, .updated, .state, .project, .activity, .started, .needs_since, .ctx, .prompt] | map(. // "") | .[]' "$f" 2>/dev/null)"
+    { IFS= read -r id;          IFS= read -r updated;  IFS= read -r state
+      IFS= read -r project;     IFS= read -r activity; IFS= read -r started
+      IFS= read -r needs_since; IFS= read -r ctx;      IFS= read -r prompt
+    } <<< "$line"
     [ -n "$id" ] || continue
     [ -n "$state" ] || state="idle"
     # Skip zombies — sessions whose state stopped advancing long ago (e.g. a
@@ -50,32 +68,57 @@ render() {
     if [ -n "$updated" ] && [ $((now - updated)) -gt "$stale" ] 2>/dev/null; then continue; fi
 
     # Live override from the render file (more current than the bus mid-turn).
+    ratt=""
     rf="$(warden_render_file "$id")"
     if [ -f "$rf" ]; then
-      IFS='|' read -r rstate rproject ractivity rctx _ < "$rf" 2>/dev/null
+      IFS='|' read -r rstate rproject ractivity rctx ratt < "$rf" 2>/dev/null
       [ -n "$rstate" ]    && state="$rstate"
       [ -n "$rproject" ]  && project="$rproject"
       [ -n "$ractivity" ] && activity="$ractivity"
       [ -n "$rctx" ]      && ctx="$rctx"
     fi
 
+    # Attention. For a working session we DERIVE it from the heartbeat rather
+    # than trusting the field, so a session whose spinner daemon died still
+    # reports "stalled" instead of cheerfully claiming to be working.
+    att=""
+    case "$state" in
+      working)   att="$(warden_attention "$id" "$slow" "$stuck" "$stuck2")" ;;
+      needs_you) att="$ratt" ;;
+    esac
+
     el=""
     if [ "$state" = "working" ] && [ -n "$started" ]; then el="$(dur $((now - started)))"; fi
     if [ "$state" = "needs_you" ] && [ -n "$needs_since" ]; then el="$(dur $((now - needs_since)))"; fi
     ctxs=""; [ -n "$ctx" ] && ctxs="${ctx}%"
 
-    case "$state" in
-      working)   working=$((working + 1)); k=1 ;;
-      needs_you) needs=$((needs + 1));     k=0 ;;
-      done)      ndone=$((ndone + 1));     k=2 ;;
-      *)         idle=$((idle + 1));       k=3 ;;
+    # Rank: what needs a human first. escalated → needs_you → stalled tiers →
+    # a slow op → healthy work → finished → idle.
+    label="$state"
+    case "${att:-$state}" in
+      escalated) needs=$((needs + 1));     k=0; label="escalated" ;;
+      stalled2)  stalled=$((stalled + 1)); k=2; label="stalled" ;;
+      stalled)   stalled=$((stalled + 1)); k=3; label="stalled" ;;
+      slow_tool) working=$((working + 1)); k=4; label="slow op" ;;
+      needs_you) needs=$((needs + 1));     k=1 ;;
+      working)   working=$((working + 1)); k=5 ;;
+      done)      ndone=$((ndone + 1));     k=6 ;;
+      *)         idle=$((idle + 1));       k=7 ;;
     esac
 
-    rows="${rows}${k}|$(warden_state_glyph "$state")|${state}|${project}|${activity}|${el}|${ctxs}|${prompt}
+    # A stalled row's useful clock is "how long since anything happened",
+    # not "how long since the turn began".
+    if [ "$att" = "stalled" ] || [ "$att" = "stalled2" ]; then
+      idle_age="$(warden_idle_age "$id")"
+      [ -n "$idle_age" ] && el="$(dur "$idle_age")"
+    fi
+
+    rows="${rows}${k}|$(warden_state_glyph "${att:-$state}")|${label}|${project}|${activity}|${el}|${ctxs}|${prompt}
 "
   done
 
-  printf '🛡  warden · %s working · %s need you · %s done · %s idle\n\n' "$working" "$needs" "$ndone" "$idle"
+  printf '🛡  warden · %s working · %s need you · %s stalled · %s done · %s idle\n\n' \
+    "$working" "$needs" "$stalled" "$ndone" "$idle"
   if [ -z "$rows" ]; then printf '   (no active sessions yet — submit a prompt in a Claude Code tab)\n'; return; fi
 
   printf '%s' "$rows" | sort -t'|' -k1,1n | while IFS='|' read -r _k glyph state project activity el ctx prompt; do
