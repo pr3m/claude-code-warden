@@ -59,14 +59,27 @@ Verify: `/warden:doctor` (it reports whether the title override is disabled).
 
 | Glyph | State | When |
 |------:|-------|------|
-| `⠙` (animated) | **working** | Claude is on your turn |
+| `⠙` (animated, fast) | **working** | Claude is on your turn |
 | `🔧 🧪 🧹 📖 ✏️ 🔎 🌐 🤖 🗒️ ⚡ 🔌 🧠` | **activity** | what kind of work, from the tool in flight (`🧠` = thinking, no tool running) |
+| `◓` (animated, slow) | **waiting** | the turn ended but subagents (`🤖`) or background shells (`🐚`) are still running — it will wake itself, you are not needed |
 | `❓` | **needs you** | Claude asked for permission/input |
 | `‼️` | **escalated** | still waiting after `escalateAfterSeconds` (+ re-ping) |
 | `🐢` | **stalled** | nothing has happened for `stuckAfterSeconds`, and no tool is running |
 | `⏳` | **stalled longer** | same, past `stuck2AfterSeconds` — or a single tool has run for `slowToolAfterSeconds` (a command hung on stdin looks exactly like this) |
 | `✅` | **done** | turn finished — your move |
 | `·` | **idle** | session open, nothing running |
+
+**A moving tab never wants your attention.** The two animated states both mean
+"leave it alone" — fast for a turn in progress, slow for background work you
+already asked for. Only the static glyphs are addressed to you. That is the
+whole triage rule: if it moves, skip it.
+
+**warden repaints even when nothing changes.** Claude Code writes the tab title
+itself (`✳ <task summary>`) and there is no setting to stop it, so a title
+painted once is gone by the time you look. The animator therefore lives as long
+as the session and repaints static states every `keeperIntervalSeconds` — that
+is what keeps a `✅` or `❓` on the tab instead of a title that tells you nothing
+about which of your twelve tabs needs a human.
 
 **`🐢` measures progress, not duration.** An agent may legitimately work for
 hours; what matters is whether anything is still happening. warden beats a
@@ -133,14 +146,19 @@ Precedence: an explicit label → `$WARDEN_LABEL` → the auto label. To rename 
 ## How it works
 
 warden is pure Claude Code hooks + standard terminal escape sequences. No
-background services beyond a tiny per-session spinner while a turn is active.
+background services beyond one small per-session animator.
 
 ```
- UserPromptSubmit ─► working  ─► start spinner daemon ─┐
+ UserPromptSubmit ─► working  ─► start animator ─┐
  PreToolUse       ─► activity glyph · beat · tool in flight
+                     (background shell / Monitor → counted as work that outlives the turn)
  PostToolUse      ─► 🧠 thinking   · beat · flight cleared
- Notification     ─► ❓ needs you ─► start escalation timer
- Stop             ─► ✅ done      ─► stop daemons
+ SubagentStart    ─► track agent id
+ SubagentStop     ─► drop agent id ─► last one out of a waiting session → ✅
+ Notification     ─► ❓ needs you  ─► start escalation timer
+ Stop             ─► ◓ waiting  if subagents/shells still running
+                     ✅ done     if nothing is left
+ SessionEnd       ─► stop daemons · forget the session
                                    │
                  each transition ──┼──► STATUS BUS  ~/.claude/warden/sessions/<id>.json
                                    └──► OSC 0 title  ─► your terminal tab
@@ -155,7 +173,17 @@ background services beyond a tiny per-session spinner while a turn is active.
   per-session `.beat` file; `PreToolUse` also drops an `.inflight` marker that
   `PostToolUse` removes. Stall detection reads those two mtimes and nothing else
    — turn duration is never an input.
-- The spinner daemon owns everything that needs a clock (stall detection, the
+- **Background work is tracked two ways, because Claude Code reports it two
+  ways.** Subagents are exact — `SubagentStart`/`SubagentStop` carry an
+  `agent_id`, so warden keeps the live set. Background shells have no completion
+  hook at all, so they are counted at launch and decremented per *self-started*
+  turn: when one finishes it wakes the session, and a turn that ends without a
+  prompt behind it is the evidence. Any tool call re-syncs the tab to `working`
+  regardless, so drift is cosmetic and brief.
+- **The animator outlives the turn**, so its exit conditions matter: the render
+  file disappearing (`SessionEnd`), another session claiming the tty, the
+  recorded `CLAUDE_PID` dying (the crash path), or the lifetime backstop.
+- The animator owns everything that needs a clock (stall detection, the
   context meter), because a hook runs on the critical path of a tool call and has
   a 5-second timeout. It also self-heals: if the animator dies mid-turn, the next
   tool call revives it.
@@ -176,6 +204,9 @@ no mid-turn context refresh — the tab still shows state, activity, and label.
 | `spinner` | `true` | animate the tab while working |
 | `spinnerFrames` | braille | array of frames — try `["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"]` |
 | `spinnerIntervalMs` | `120` | frame interval |
+| `waitingFrames` | `["◐","◓","◑","◒"]` | frames for waiting-on-background-work |
+| `waitingIntervalMs` | `400` | waiting frame interval — keep it visibly slower than the spinner, that contrast *is* the signal |
+| `keeperIntervalSeconds` | `2` | how often a static tab is repainted so Claude Code's own title can't take it back (`0` is treated as 1) |
 | `showProject` / `showActivity` / `showContext` | `true` | what rides the tab |
 | `escalateAfterSeconds` | `45` | needs-you → escalated threshold (`0` = off) |
 | `escalateReping` | `true` | re-ping the system sound on escalation |

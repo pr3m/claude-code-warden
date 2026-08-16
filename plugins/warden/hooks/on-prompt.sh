@@ -19,8 +19,24 @@ CWD="$(warden_payload_get '.cwd')"; [ -z "$CWD" ] && CWD="$PWD"
 warden_claim_tty "$TTY" "$ID"   # own this device before painting (recycled-tty guard)
 PROJECT="$(warden_label_for "$TTY" "$CWD")"
 TRANSCRIPT="$(warden_payload_get '.transcript_path')"
+# The trailing `tr` turns jq's closing newline into a space, so trim it — the
+# label ends up in a tab title and a cockpit column, both of which show it raw.
 PROMPT="$(warden_strip_controls "$(warden_payload_get '.prompt' | tr '\n' ' ' | cut -c1-48)")"
+PROMPT="${PROMPT%"${PROMPT##*[![:space:]]}"}"
 STARTED="$(warden_now)"
+
+# A background task reporting in wakes the session through this same hook. It is
+# not your turn: it must not arm the human-turn marker, and it must not overwrite
+# the tab's label with `<task-notification>` — the cockpit column is there to
+# remind you what the tab is doing, not what woke it.
+WAKEUP=0
+if warden_is_wakeup_prompt "$PROMPT"; then
+  WAKEUP=1
+  PREV="$(warden_bus_read "$ID" prompt)"
+  # Blank beats `<task-notification>`: an empty label is merely unhelpful, a
+  # wrong one actively misleads.
+  PROMPT="$PREV"
+fi
 
 CTX="$(bash "$BIN_DIR/warden-context.sh" "$TRANSCRIPT" 2>/dev/null)"
 
@@ -31,6 +47,12 @@ warden_kill_pidfile "$(warden_escalate_pid "$ID")"
 # marker from a killed turn would otherwise mask a stall for the next 15 min.
 warden_beat "$ID"
 warden_inflight_end "$ID"
+
+# Mark this turn as one a human asked for. Stop reads it to tell your turn from
+# the ones the session starts for itself when background work reports in.
+[ "$WAKEUP" -eq 0 ] && warden_human_turn_begin "$ID"
+# Proof of life for the animator, which now outlives the turn.
+warden_session_pid_write "$ID"
 
 warden_render_write "$ID" "working" "$PROJECT" "🧠" "$CTX" ""
 warden_bus_write "$ID" "working" "$PROJECT" "🧠" "$TTY" "$CWD" "$STARTED" "$PROMPT" "$CTX" "" "" "$TRANSCRIPT"

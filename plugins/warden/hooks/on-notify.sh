@@ -26,7 +26,9 @@ if [ -f "$RENDER" ]; then IFS='|' read -r CURSTATE PROJECT _a CTX _ < "$RENDER" 
 # trailing/idle Notification — that's a false alarm. Leave it as done.
 [ "$CURSTATE" = "done" ] && exit 0
 
-warden_kill_pidfile "$(warden_spinner_pid "$ID")"
+# The animator is not killed: it reads the render file and drops to its slow
+# keeper tick for a static state, which is what stops Claude Code's own title
+# from overwriting the ❓ a second later.
 # Replace any prior escalation timer, so repeated Notifications (permission
 # cascades) don't stack multiple alarm daemons (duplicate sounds + orphans).
 warden_kill_pidfile "$(warden_escalate_pid "$ID")"
@@ -47,6 +49,9 @@ warden_write_progress "$TTY" 2 100   # red/attention bar on terminals that suppo
 warden_bus_write "$ID" "needs_you" "$PROJECT" "" "$TTY" "$CWD" \
   "$STARTED" "$PROMPT" "$CTX" "$NOW" "" "$TRANSCRIPT"
 warden_dispatch_state "$ID"
+# Keep the ❓ on the tab: without a repainting daemon, Claude Code's own title
+# takes the tab back and the blocked session looks like every other one.
+warden_spinner_ensure "$ID" "$TTY" "$BIN_DIR" || true
 
 ESC="$(warden_cfg '.escalateAfterSeconds' '45')"
 if [ "$ESC" -gt 0 ] 2>/dev/null && ! warden_pid_alive "$(warden_escalate_pid "$ID")"; then

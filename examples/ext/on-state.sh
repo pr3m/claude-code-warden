@@ -2,7 +2,9 @@
 # on-state.sh — OPTIONAL warden extension (example template).
 #
 # Install: copy to ~/.claude/warden/ext/on-state.sh and `chmod +x` it.
-# warden invokes it on every state transition (working / needs_you / done) and
+# warden invokes it on every state transition (working / waiting / needs_you /
+# done — `waiting` means the turn ended with subagents or background shells
+# still running, so it is the one state that never wants a human) and
 # pipes the full session bus JSON to stdin. It runs DETACHED and fire-and-forget,
 # so it never blocks or slows a Claude Code turn — but keep it quick anyway.
 #

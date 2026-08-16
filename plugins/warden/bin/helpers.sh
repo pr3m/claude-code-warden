@@ -40,6 +40,15 @@ warden_beat_file()     { printf '%s/%s.beat\n'         "$(warden_sessions_dir)" 
 # Present exactly while a tool is executing; its mtime is that tool's start time.
 # Distinguishes "one slow operation" from "the agent has stopped doing anything".
 warden_inflight_file() { printf '%s/%s.inflight\n'     "$(warden_sessions_dir)" "$1"; }
+# Background work that outlives a turn. A session whose turn ended while these
+# are non-empty is WAITING, not done — it will wake itself up, and nothing is
+# being asked of the user.
+warden_agents_file()   { printf '%s/%s.agents\n'       "$(warden_sessions_dir)" "$1"; }
+warden_bgshells_file() { printf '%s/%s.bgshells\n'     "$(warden_sessions_dir)" "$1"; }
+# Set when a human submits a prompt, consumed by the next Stop. Distinguishes a
+# turn you asked for from one the session started for itself when a background
+# task reported in.
+warden_humanturn_file() { printf '%s/%s.humanturn\n'   "$(warden_sessions_dir)" "$1"; }
 
 warden_ensure_dirs() { mkdir -p "$(warden_sessions_dir)"; }
 
@@ -104,6 +113,129 @@ warden_attention() {
   if   [ "$age" -ge "$stuck2" ] 2>/dev/null; then printf 'stalled2\n'
   elif [ "$age" -ge "$stuck"  ] 2>/dev/null; then printf 'stalled\n'
   fi
+  return 0
+}
+
+# --- Background work ------------------------------------------------------
+#
+# Two kinds outlive a turn, and warden tracks them differently because Claude
+# Code reports them differently:
+#
+#   subagents — exact. SubagentStart/SubagentStop carry an agent_id, so we keep
+#               the live set and can never drift.
+#   background shells (`run_in_background` Bash, Monitor) — counted at launch.
+#   There is no completion hook for them; what there IS is a wake-up turn when
+#   one finishes, so the count is decremented per self-started turn (see
+#   warden_bg_shell_dec). The count is a floor-zero approximation and any tool
+#   call re-syncs the tab to working regardless, so drift is cosmetic and brief.
+
+warden_bg_agent_add() { # <id> <agent_id>
+  warden_ensure_dirs
+  local f; f="$(warden_agents_file "$1")"
+  printf '%s\n' "$2" >> "$f" 2>/dev/null || true
+}
+
+warden_bg_agent_del() { # <id> <agent_id>
+  local f tmp; f="$(warden_agents_file "$1")"
+  [ -f "$f" ] || return 0
+  tmp="${f}.$$.tmp"
+  grep -vxF "$2" "$f" > "$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  else rm -f "$tmp" "$f" 2>/dev/null; fi
+}
+
+warden_bg_agent_count() { # <id>
+  local f n; f="$(warden_agents_file "$1")"
+  [ -f "$f" ] || { printf '0\n'; return 0; }
+  # `grep -c` prints 0 AND exits non-zero on an empty file, so a `|| printf 0`
+  # fallback would emit two zeros and turn the caller's arithmetic into a syntax
+  # error. Normalise the value instead of trusting the exit code.
+  n="$(grep -c . "$f" 2>/dev/null)"; case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s\n' "$n"
+}
+
+warden_bg_shell_add() { # <id>
+  warden_ensure_dirs
+  local f n; f="$(warden_bgshells_file "$1")"
+  n="$(cat "$f" 2>/dev/null)"; case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s\n' "$((n + 1))" > "$f" 2>/dev/null || true
+}
+
+# One finished background shell wakes the session for exactly one turn, so a
+# self-started turn ending is our evidence that one of them is done.
+warden_bg_shell_dec() { # <id>
+  local f n; f="$(warden_bgshells_file "$1")"
+  [ -f "$f" ] || return 0
+  n="$(cat "$f" 2>/dev/null)"; case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$((n - 1)); [ "$n" -lt 0 ] && n=0
+  if [ "$n" -eq 0 ]; then rm -f "$f" 2>/dev/null || true
+  else printf '%s\n' "$n" > "$f" 2>/dev/null || true; fi
+}
+
+warden_bg_shell_count() { # <id>
+  local f n; f="$(warden_bgshells_file "$1")"
+  n="$(cat "$f" 2>/dev/null)"; case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s\n' "$n"
+}
+
+warden_bg_pending() { # <id> — total live background work
+  printf '%s\n' "$(( $(warden_bg_agent_count "$1") + $(warden_bg_shell_count "$1") ))"
+}
+
+# What the tab shows next to the moon: who we are actually waiting for.
+warden_bg_activity() { # <id>
+  local a s out=""
+  a="$(warden_bg_agent_count "$1")"; s="$(warden_bg_shell_count "$1")"
+  # Braces are load-bearing: `$out🐚` parses the emoji as part of the variable
+  # name, which under `set -u` aborts the function and blanks the marker.
+  [ "$a" -gt 0 ] 2>/dev/null && out="🤖"
+  [ "$s" -gt 0 ] 2>/dev/null && out="${out}🐚"
+  printf '%s\n' "$out"
+}
+
+warden_bg_clear() { # <id> — session is over; forget everything in flight
+  rm -f "$(warden_agents_file "$1")" "$(warden_bgshells_file "$1")" \
+        "$(warden_humanturn_file "$1")" "$(warden_session_pid_file "$1")" 2>/dev/null || true
+}
+
+# --- Session liveness ------------------------------------------------------
+# The animator now outlives every turn, so a session that dies without firing
+# SessionEnd (crash, kill -9, a closed terminal) would leave a loop repainting
+# a tab nobody owns. Claude Code exports CLAUDE_PID into every hook, which is
+# the cheapest possible proof of life.
+
+warden_session_pid_file() { printf '%s/%s.claudepid\n' "$(warden_sessions_dir)" "$1"; }
+
+warden_session_pid_write() { # <id>
+  [ -n "${CLAUDE_PID:-}" ] || return 0
+  warden_ensure_dirs
+  printf '%s\n' "$CLAUDE_PID" > "$(warden_session_pid_file "$1")" 2>/dev/null || true
+}
+
+# True unless we can PROVE the session is gone. No recorded pid means no
+# evidence, and a daemon must never reap itself on a guess.
+warden_session_alive() { # <id>
+  local pid; pid="$(cat "$(warden_session_pid_file "$1")" 2>/dev/null)"
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+# Claude Code wakes a session by submitting a prompt on its behalf when a
+# background task reports in, so `UserPromptSubmit` alone does NOT mean a human
+# typed something. The wake-up carries a `<task-notification>` block as its
+# prompt — the only thing that separates "you asked for this" from "a shell you
+# launched an hour ago just finished".
+warden_is_wakeup_prompt() { # <prompt-text>
+  case "$1" in
+    *'<task-notification>'*|*'<task-id>'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+warden_human_turn_begin() { warden_ensure_dirs; : > "$(warden_humanturn_file "$1")" 2>/dev/null || true; }
+warden_human_turn_taken() { # <id> — true once, then consumed
+  [ -f "$(warden_humanturn_file "$1")" ] || return 1
+  rm -f "$(warden_humanturn_file "$1")" 2>/dev/null || true
   return 0
 }
 
@@ -351,6 +483,9 @@ warden_default_config() {
   "spinner": true,
   "spinnerFrames": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"],
   "spinnerIntervalMs": 120,
+  "waitingFrames": ["◐", "◓", "◑", "◒"],
+  "waitingIntervalMs": 400,
+  "keeperIntervalSeconds": 2,
   "showProject": true,
   "showActivity": true,
   "showContext": true,
@@ -366,6 +501,7 @@ warden_default_config() {
   "maxLifetimeSeconds": 86400,
   "glyphs": {
     "working": "⚙",
+    "waiting": "◐",
     "needs_you": "❓",
     "escalated": "‼️",
     "stuck": "🐢",
@@ -389,8 +525,12 @@ warden_cfg() {
   local path="$1" def="$2" f val
   f="$(warden_config_file)"
   if warden_has_jq && [ -f "$f" ]; then
-    val="$(jq -r "$path // empty" "$f" 2>/dev/null)"
-    if [ -n "$val" ]; then printf '%s\n' "$val"; return; fi
+    # NOT `$path // empty`: jq's alternative operator treats `false` as absent,
+    # so every boolean a user set to false — `"spinner": false`,
+    # `"showProject": false`, `"escalateReping": false` — silently read back as
+    # the default `true`. Turning a warden feature off simply did not work.
+    val="$(jq -r "$path" "$f" 2>/dev/null)"
+    if [ -n "$val" ] && [ "$val" != "null" ]; then printf '%s\n' "$val"; return; fi
   fi
   printf '%s\n' "$def"
 }
@@ -406,6 +546,7 @@ warden_cfg() {
 warden_state_glyph() {
   case "$1" in
     working)            warden_cfg '.glyphs.working'   '⚙' ;;
+    waiting)            warden_cfg '.glyphs.waiting'   '◐' ;;
     needs_you)          warden_cfg '.glyphs.needs_you' '❓' ;;
     escalated)          warden_cfg '.glyphs.escalated' '‼️' ;;
     stalled|stuck)      warden_cfg '.glyphs.stuck'     '🐢' ;;

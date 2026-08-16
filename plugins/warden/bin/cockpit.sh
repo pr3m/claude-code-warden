@@ -25,10 +25,10 @@ dur() {
 }
 
 render() {
-  local dir now working needs done idle stalled rows
+  local dir now working needs done idle stalled waiting rows
   dir="$(warden_sessions_dir)"
   now="$(warden_now)"
-  working=0; needs=0; ndone=0; idle=0; stalled=0; rows=""
+  working=0; needs=0; ndone=0; idle=0; stalled=0; waiting=0; rows=""
   local stale slow stuck stuck2
   stale="$(warden_cfg '.staleDisplaySeconds' '86400')"
   # Read the attention thresholds once, then pass them down — warden_attention
@@ -93,7 +93,9 @@ render() {
     ctxs=""; [ -n "$ctx" ] && ctxs="${ctx}%"
 
     # Rank: what needs a human first. escalated → needs_you → stalled tiers →
-    # a slow op → healthy work → finished → idle.
+    # a slow op → healthy work → waiting on background work → finished → idle.
+    # `waiting` ranks below working and above done: it is progress you did not
+    # have to ask for, and the one row type that never wants your attention.
     label="$state"
     case "${att:-$state}" in
       escalated) needs=$((needs + 1));     k=0; label="escalated" ;;
@@ -102,8 +104,9 @@ render() {
       slow_tool) working=$((working + 1)); k=4; label="slow op" ;;
       needs_you) needs=$((needs + 1));     k=1 ;;
       working)   working=$((working + 1)); k=5 ;;
-      done)      ndone=$((ndone + 1));     k=6 ;;
-      *)         idle=$((idle + 1));       k=7 ;;
+      waiting)   waiting=$((waiting + 1)); k=6; label="waiting" ;;
+      done)      ndone=$((ndone + 1));     k=7 ;;
+      *)         idle=$((idle + 1));       k=8 ;;
     esac
 
     # A stalled row's useful clock is "how long since anything happened",
@@ -117,8 +120,8 @@ render() {
 "
   done
 
-  printf '🛡  warden · %s working · %s need you · %s stalled · %s done · %s idle\n\n' \
-    "$working" "$needs" "$stalled" "$ndone" "$idle"
+  printf '🛡  warden · %s working · %s need you · %s stalled · %s waiting · %s done · %s idle\n\n' \
+    "$working" "$needs" "$stalled" "$waiting" "$ndone" "$idle"
   if [ -z "$rows" ]; then printf '   (no active sessions yet — submit a prompt in a Claude Code tab)\n'; return; fi
 
   printf '%s' "$rows" | sort -t'|' -k1,1n | while IFS='|' read -r _k glyph state project activity el ctx prompt; do

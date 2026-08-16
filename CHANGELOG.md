@@ -9,7 +9,37 @@ An audit of every indicator warden paints, against what it can actually observe.
 Four of them were lying. The root cause was shared: warden knew when a turn
 *started* and nothing about whether it was making progress.
 
+### Added
+- **`◓ waiting` — the turn ended, but work you asked for is still running.**
+  Subagents and background shells outlive a turn, and warden called that `✅ done`.
+  You would go to the tab and find nothing to do; worse, the tabs that genuinely
+  needed you looked identical. Waiting animates on a slower cadence than working,
+  with a marker for what it is waiting on (`🤖` subagents, `🐚` background shells),
+  and it is never flagged as stalled — no tool is running because none is meant
+  to be. One rule now covers the whole fleet: **if the tab is moving, skip it.**
+  Subagents are tracked exactly via `SubagentStart`/`SubagentStop`; background
+  shells have no completion hook, so they are counted at launch and cleared per
+  self-started turn (a finishing shell wakes the session, and that wake-up is the
+  evidence).
+- **A `SessionEnd` hook.** The animator now outlives turns, so something has to
+  end it. It also exits on its own when the recorded `CLAUDE_PID` dies — the
+  crash path, where no hook fires at all.
+- **Config is re-read while the animator runs.** It used to be read once at
+  launch, which was fine when the animator lived for one turn; now that it lives
+  for the session, that would have meant restarting Claude Code to change the
+  spinner. Edits to `config.json` apply within a tick.
+- `waitingFrames`, `waitingIntervalMs`, `keeperIntervalSeconds` and
+  `glyphs.waiting` config keys, plus a `test/animator.sh` suite that runs the
+  real daemon against a pipe and asserts what it paints.
+
 ### Changed (behaviour)
+- **warden keeps the tab, permanently.** Claude Code paints the terminal title
+  itself (`✳ <task summary>`) with no setting to disable it, so every title
+  warden wrote once was overwritten seconds later: `✅` and `❓` tabs decayed to a
+  generic marker and the fleet view in your tab bar went blank exactly when it
+  mattered. The animator now lives for the session rather than the turn and
+  repaints static states every `keeperIntervalSeconds`. `Notification` and `Stop`
+  no longer kill it.
 - **`🐢` / `⏳` now measure progress, not turn duration.** They were computed from
   `now - turn_start`, so *any* turn past five minutes was flagged — which for an
   agentic session is most of them. warden now beats a heartbeat (`<id>.beat`) on
@@ -30,6 +60,29 @@ Four of them were lying. The root cause was shared: warden knew when a turn
   escalated → needs you → stalled → slow op → working → done → idle.
 
 ### Fixed
+- **`UserPromptSubmit` is not proof a human typed.** Claude Code submits a
+  prompt on the session's own behalf when a background task reports in — the
+  wake-up arrives carrying a `<task-notification>` block. warden counted that as
+  your turn, so the background-shell count never came back down and a tab could
+  sit on the waiting moon forever; the cockpit's prompt column also read
+  `<task-notification>` instead of what the tab was doing. Both now key off the
+  prompt text, and a finished turn keeps its label instead of blanking it.
+- **Every `false` in config.json was ignored.** `warden_cfg` read values with
+  jq's `//` alternative operator, which treats `false` exactly like null — so
+  `"spinner": false`, `"showProject": false`, `"showActivity": false`,
+  `"showContext": false` and `"escalateReping": false` all silently read back as
+  the default `true`. Turning any warden feature off did nothing. Found because
+  the test sandbox sets `"spinner": false` and was spawning real animator
+  daemons anyway, which then outlived the test run.
+- **A subagent finishing marked the whole session `❓ needs you`.** warden's
+  `Notification` hook carried no matcher, so it fired on all nine notification
+  types — including `agent_completed`, `agent_needs_input` and `auth_success`.
+  A working session with subagents out would flip to the needs-you glyph, stop
+  its spinner, and arm the escalation daemon, which then pinged every
+  `escalateAfterSeconds` at a session nobody was blocking. The hook is now
+  scoped to the four types that actually block on a human:
+  `permission_prompt`, `idle_prompt`, `elicitation_dialog`,
+  `elicitation_url_dialog`.
 - **The cockpit could never show `🐢`, `⏳`, or `‼️`.** Only four states ever
   reached the render file or the status bus; stall and escalation were painted
   straight to a tab title and existed nowhere else. The fleet view — the entire

@@ -22,6 +22,14 @@ HOOKS="$ROOT/hooks"
 
 SANDBOX="$(mktemp -d)"
 export HOME="$SANDBOX"
+# Belt to the sandbox config's braces: if a daemon ever does get spawned here,
+# it must not outlive the test loop repainting a tab that isn't ours.
+cleanup_sandbox() {
+  pkill -f "spinner-daemon.sh s9 " 2>/dev/null
+  pkill -f "escalate-daemon.sh s9 " 2>/dev/null
+  rm -rf "$SANDBOX" 2>/dev/null
+}
+trap cleanup_sandbox EXIT
 
 STUB="$SANDBOX/stub"; mkdir -p "$STUB"
 printf '#!/bin/sh\nexit 0\n' > "$STUB/ps"; chmod +x "$STUB/ps"
@@ -45,8 +53,8 @@ is() { if [ "$2" = "$3" ]; then ok "$1"; else no "$1" "$2" "$3"; fi; }
 ID="s9"
 TRANSCRIPT="$SANDBOX/t.jsonl"; : > "$TRANSCRIPT"
 
-fire() { # fire <hook.sh> <json payload>
-  printf '%s' "$2" | bash "$HOOKS/$1" >/dev/null 2>&1
+fire() { # fire <hook.sh> <json payload> [args...]
+  printf '%s' "$2" | bash "$HOOKS/$1" "${@:3}" >/dev/null 2>&1
 }
 field() { # field <n>  (1=state 2=project 3=activity 4=ctx 5=attention)
   cut -d'|' -f"$1" "$(warden_render_file "$ID")" 2>/dev/null
@@ -99,6 +107,63 @@ fire on-stop.sh "{$BASE}"
 is "on-stop: state done"           "done" "$(field 1)"
 is "on-stop: flight cleared"       "no"   "$(inflight)"
 
+# --- Background work --------------------------------------------------------
+# A turn can end with work still running. Calling that "done" sends you to a tab
+# that has nothing for you — the exact false alarm this state exists to prevent.
+printf '\nbackground work\n'
+
+BID="s10"
+BBASE="\"session_id\":\"$BID\",\"cwd\":\"$PROJ\",\"transcript_path\":\"$TRANSCRIPT\""
+bfield() { cut -d'|' -f"$1" "$(warden_render_file "$BID")" 2>/dev/null; }
+
+# A subagent still running when the turn ends.
+fire on-prompt.sh "{$BBASE,\"prompt\":\"go wide\"}"
+fire on-subagent.sh "{$BBASE,\"agent_id\":\"agent-1\",\"agent_type\":\"senior-developer\"}" start
+fire on-subagent.sh "{$BBASE,\"agent_id\":\"agent-2\",\"agent_type\":\"qa-engineer\"}" start
+is "two subagents tracked"          "2"       "$(warden_bg_agent_count "$BID")"
+fire on-stop.sh "{$BBASE}"
+is "stop with subagents: waiting"   "waiting" "$(bfield 1)"
+is "stop with subagents: 🤖 marker" "🤖"      "$(bfield 3)"
+
+# One finishes: still waiting on the other.
+fire on-subagent.sh "{$BBASE,\"agent_id\":\"agent-1\"}" stop
+is "one subagent left: still waiting" "waiting" "$(bfield 1)"
+# The last one finishes: now it really is yours again.
+fire on-subagent.sh "{$BBASE,\"agent_id\":\"agent-2\"}" stop
+is "last subagent done: state done"  "done" "$(bfield 1)"
+is "agent set emptied"               "0"    "$(warden_bg_agent_count "$BID")"
+
+# A backgrounded shell still running when the turn ends.
+fire on-prompt.sh "{$BBASE,\"prompt\":\"kick off the build\"}"
+fire on-pretool.sh "{$BBASE,\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"npm run build\",\"run_in_background\":true}}"
+is "background shell counted"        "1" "$(warden_bg_shell_count "$BID")"
+fire on-stop.sh "{$BBASE}"
+is "stop with a shell: waiting"      "waiting" "$(bfield 1)"
+is "stop with a shell: 🐚 marker"    "🐚"      "$(bfield 3)"
+
+# A foreground command must NOT count as background work.
+fire on-prompt.sh "{$BBASE,\"prompt\":\"now something quick\"}"
+fire on-pretool.sh "{$BBASE,\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls\"}}"
+is "foreground shell not counted"    "1" "$(warden_bg_shell_count "$BID")"
+fire on-stop.sh "{$BBASE}"
+is "your turn ends, shell still out" "waiting" "$(bfield 1)"
+
+# The shell finishes. Claude Code wakes the session by submitting a prompt ON
+# ITS BEHALF — a `<task-notification>` block — so UserPromptSubmit fires even
+# though no human typed. Mistaking that for your turn is what would pin the tab
+# on the waiting moon forever.
+fire on-prompt.sh "{$BBASE,\"prompt\":\"<task-notification> <task-id>b30wopw5c</task-id>\"}"
+is "wake-up is not a human turn"     "no"   "$([ -f "$(warden_humanturn_file "$BID")" ] && echo yes || echo no)"
+is "wake-up keeps the tab's label"   "now something quick" "$(warden_bus_read "$BID" prompt)"
+fire on-stop.sh "{$BBASE}"
+is "wake-up turn clears the shell"   "0"    "$(warden_bg_shell_count "$BID")"
+is "nothing left: state done"        "done" "$(bfield 1)"
+
+# Session ends: no daemon may outlive the tab.
+fire on-session-end.sh "{$BBASE}"
+is "session end drops the render"    "no" "$([ -f "$(warden_render_file "$BID")" ] && echo yes || echo no)"
+is "session end clears background"   "0"  "$(warden_bg_pending "$BID")"
+
 # --- Cockpit ----------------------------------------------------------------
 printf '\ncockpit\n'
 
@@ -120,6 +185,13 @@ jq -n --arg up "$NOW" \
     transcript:"",updated:$up}' > "$(warden_session_file "zombie")"
 warden_beat "zombie"
 perl -e 'my $t = time - 420; utime $t, $t, $ARGV[0] or die' "$(warden_beat_file "zombie")"
+
+# A session waiting on background work: it must read as waiting, never as done
+# (nothing to do there) and never as stalled (nothing is supposed to be running).
+jq -n --arg up "$NOW" \
+  '{id:"bg",state:"waiting",project:"fanout",activity:"🤖",tty:"/dev/tty",
+    cwd:"/x",started:"1",prompt:"review it all",ctx:"",needs_since:"",attention:"",
+    transcript:"",updated:$up}' > "$(warden_session_file "bg")"
 
 OUT="$(bash "$BIN/cockpit.sh" 2>&1)"
 
@@ -144,6 +216,15 @@ esac
 case "$OUT" in
   *"7m"*) ok "stalled row clocks idle time, not turn duration" ;;
   *)      no "stalled row clocks idle time, not turn duration" "*7m*" "$OUT" ;;
+esac
+
+case "$OUT" in
+  *waiting*fanout*) ok "cockpit shows a waiting session as its own row" ;;
+  *)                no "cockpit shows a waiting session as its own row" "waiting fanout" "$OUT" ;;
+esac
+case "$OUT" in
+  *"1 waiting"*) ok "cockpit header counts the waiting session" ;;
+  *)             no "cockpit header counts the waiting session" "1 waiting" "$OUT" ;;
 esac
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

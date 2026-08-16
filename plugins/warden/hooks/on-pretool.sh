@@ -28,6 +28,14 @@ if [ "$TOOL" = "Bash" ]; then
   esac
 fi
 
+# Work that will outlive this turn. A backgrounded shell and a Monitor both
+# return immediately and keep running, so the turn can end with them still
+# going — that is the difference between "done" and "waiting".
+case "$TOOL" in
+  Bash)    [ "$(warden_payload_get '.tool_input.run_in_background')" = "true" ] && warden_bg_shell_add "$ID" ;;
+  Monitor) warden_bg_shell_add "$ID" ;;
+esac
+
 # A tool is starting: that is progress, and it is now in flight. Both must be
 # recorded before we paint, so the daemon's next tick sees the truth.
 warden_beat "$ID"
