@@ -28,7 +28,7 @@ examples/ext/*.sh                       extension-seam templates (project-label,
 README.md  CHANGELOG.md  LICENSE (MIT)
 ```
 
-`bin/helpers.sh` is the spine — paths, tty resolution, glyphs, the render/bus
+`plugins/warden/bin/helpers.sh` is the spine — paths, tty resolution, glyphs, the render/bus
 writers, label resolution, daemon lifecycle. Read it first.
 
 ## Critical constraints — do not violate
@@ -127,7 +127,7 @@ back with `cat <file> | tr -d '\007' | sed 's/\x1b]0;/[TAB] /'`.
 ## Conventions
 
 - Shell: `set -u`; mirror the existing helper idiom; comment the *why*, not the *what*.
-- New config keys → add to `warden_default_config` in `helpers.sh` (read via `warden_cfg`).
+- New config keys → add to `warden_default_config` in `plugins/warden/bin/helpers.sh` (read via `warden_cfg`).
 - New per-session state file → key it `<id>.<suffix>` in the sessions dir and add
   it to the SessionStart prune loop **and** `warden clean`.
 - New glyphs/states → `warden_state_glyph` / `warden_activity_glyph` + the
