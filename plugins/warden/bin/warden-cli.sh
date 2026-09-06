@@ -92,6 +92,66 @@ case "$cmd" in
     esac
     ;;
 
+  sound)
+    # The one audio switch on this machine. `audioEnabled` lives in warden's own
+    # config rather than a second settings file, and is read live at every
+    # playback decision — by warden's escalation ping and by any other local
+    # emitter wired to honour it — so a running daemon goes quiet on its next
+    # tick instead of needing a restart.
+    #
+    # Turning sound off never touches state tracking: glyphs, the status bus,
+    # escalation and the cockpit all carry on exactly as before.
+    warden_ensure_config
+    sub="${1:-status}"
+    case "$sub" in
+      on|off)
+        [ "$sub" = 'on' ] && v='true' || v='false'
+        if warden_cfg_set '.audioEnabled' "$v"; then
+          printf '🛡  warden: audio %s (audioEnabled=%s in %s)\n' \
+            "$([ "$v" = 'true' ] && echo 'ON' || echo 'OFF — muted')" "$v" "$(warden_config_file)"
+          printf '    running daemons pick this up on their next tick; tracking is unaffected.\n'
+        else
+          printf 'warden sound: could not write %s (jq missing or not writable).\n' "$(warden_config_file)"; exit 1
+        fi
+        ;;
+      reping)
+        # Which emitter owns the repeating needs-you chime. Left alone by
+        # default so a standalone install keeps the behaviour it shipped with;
+        # turn it off when another local tool already makes that sound, so the
+        # two do not talk over each other.
+        case "${2:-status}" in
+          on|off)
+            [ "$2" = 'on' ] && v='true' || v='false'
+            if warden_cfg_set '.escalateReping' "$v"; then
+              printf '🛡  warden: escalation re-ping %s (escalateReping=%s)\n' \
+                "$([ "$v" = 'true' ] && echo 'ON — warden owns the repeating chime' || echo 'OFF — another emitter owns it')" "$v"
+              printf '    the ‼️ glyph and the escalated state are unchanged either way.\n'
+            else
+              printf 'warden sound: could not write %s.\n' "$(warden_config_file)"; exit 1
+            fi
+            ;;
+          *) printf '🛡  escalateReping : %s\n' "$(warden_cfg '.escalateReping' 'true')" ;;
+        esac
+        ;;
+      status|"")
+        printf '🛡  warden sound\n\n'
+        printf '  config file    : %s\n' "$(warden_config_file)"
+        printf '  audioEnabled   : %s%s\n' "$(warden_cfg '.audioEnabled' 'true')" \
+          "$(warden_audio_enabled && echo '' || echo '   → every honouring emitter is muted')"
+        if [ "$(warden_cfg '.escalateReping' 'true')" = 'true' ]; then
+          printf '  escalateReping : true    warden re-pings a blocked session every %ss\n' \
+            "$(warden_cfg '.escalateAfterSeconds' '45')"
+        else
+          printf '  escalateReping : false   another emitter owns the repeating chime\n'
+        fi
+        printf '  platform audio : %s\n' "$([ "$(warden_platform)" = 'darwin' ] && echo 'afplay' || echo 'none — warden is silent off macOS')"
+        printf '\n  warden sound on|off          mute or unmute every honouring emitter\n'
+        printf '  warden sound reping on|off   hand the repeating chime to/from warden\n'
+        ;;
+      *) printf 'usage: warden sound [status|on|off|reping on|reping off]\n'; exit 1 ;;
+    esac
+    ;;
+
   doctor)
     printf '🛡  warden doctor\n\n'
     printf '  version        : %s\n' "$(warden_version)"
@@ -103,6 +163,9 @@ case "$cmd" in
     printf '  jq present     : %s\n' "$(warden_has_jq && echo yes || echo 'NO — context meter + cockpit degraded')"
     printf '  data dir       : %s\n' "$(warden_data_dir)"
     printf '  config         : %s\n' "$([ -f "$(warden_config_file)" ] && echo present || echo 'missing (run any session to create)')"
+    printf '  audio          : %s (audioEnabled=%s, escalateReping=%s)\n' \
+      "$(warden_audio_enabled && echo on || echo 'OFF — muted')" \
+      "$(warden_cfg '.audioEnabled' 'true')" "$(warden_cfg '.escalateReping' 'true')"
     printf '  sessions known : %s\n' "$(ls -1 "$(warden_sessions_dir)"/*.json 2>/dev/null | wc -l | tr -d ' ')"
     printf '  ext label hook : %s\n' "$([ -x "$(warden_data_dir)/ext/project-label.sh" ] && echo active || echo 'none (default: git repo name)')"
     printf '  ext state hook : %s\n' "$([ -x "$(warden_data_dir)/ext/on-state.sh" ] && echo active || echo none)"
@@ -140,6 +203,11 @@ usage: warden <command>
                   warden label --clear         back to the auto label
                   warden label                 show the current label
   config        show | edit | path   — tweak glyphs, spinner, thresholds
+  sound         the audio switch — mute every emitter that honours it:
+                  warden sound              show the current setting
+                  warden sound off          silence (tracking keeps running)
+                  warden sound on           unmute
+                  warden sound reping off   hand the repeating chime to another tool
   doctor        environment + terminal diagnostics, paints a test title
   clean         stop all daemons and clear the status bus
   version       print the installed warden version

@@ -3,6 +3,65 @@
 All notable changes to **warden** are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [Unreleased]
+
+warden was treating every `Notification` as the same emergency, and it was the
+loudest thing on the machine while doing it.
+
+### Changed
+- **`on-notify` classifies before it touches anything.** It used to flip the tab
+  to `❓`, clear the in-flight marker and reset the escalation timer *first*, and
+  only then look at what had actually happened. Two bugs fell out of that. A
+  generic `idle_prompt` — which Claude Code emits for any quiet session,
+  including one parked on its own background work — manufactured an attention
+  state nobody had asked for and started a daemon that re-pinged every 45
+  seconds. And because the reset ran before the classification, an idle nudge
+  arriving a second after a real permission prompt quietly **disarmed** it.
+
+  Now only `permission_prompt`, `elicitation_dialog` and `elicitation_url_dialog`
+  get past the gate. Everything else — `idle_prompt`, an unrecognised type, a
+  missing field — returns without writing a byte, so it can neither invent an
+  ask nor displace one. Uncertainty is not an ask.
+
+  The consequence worth stating: a session parked on a question warden cannot
+  see no longer reaches `‼️`. That marker claimed "still waiting on you after 45
+  seconds", which was never true of a session that had asked for nothing.
+- **A dialog after a finished turn is no longer swallowed.** A blanket "already
+  `✅`, leave it alone" guard existed to stop a trailing idle notification from
+  un-finishing a completed turn. The classification does that job properly now,
+  and the old guard was also throwing away real permission prompts — which
+  arrive right after a turn reports done more often than you would think.
+- **`escalateReping` is re-read on every tick** rather than once at daemon start,
+  so handing the repeating chime to another tool takes effect without a restart.
+
+### Added
+- **`warden sound` — one switch for everything that opts in.** A new
+  `audioEnabled` key (default `true`, so nothing changes for an existing
+  install) read *live*, at the moment warden is about to play something. A
+  detached escalation daemon **started from this version** therefore goes quiet
+  on its next tick instead of having to be hunted down and killed. (A daemon
+  launched from an older copy keeps running that older code until it exits;
+  editing a file on disk never reaches a running shell.)
+
+  It is documented as a shared key on purpose — any other local tool that chimes
+  can opt in with a one-line `jq` read, and muting them one at a time is how you
+  end up hunting a sound you cannot find. It is not a system mute: it reaches
+  exactly the emitters that read the key, and nothing else.
+
+  Muting affects sound only. Classification, the status bus, the `❓`/`‼️` glyphs
+  and escalation all carry on — you lose the noise, not the information.
+- **`notify_kind` on the status bus.** Which dialog warden acted on, published
+  for the cockpit and for external readers.
+
+### Tests
+- `test/audio-switch.sh` — the mute switch (including flipped *under* a running
+  daemon), which notification types earn an alarm, that a generic event writes
+  nothing and cannot displace a live ask, that a dialog after a done turn still
+  lands, and that the hook prints nothing on stdout. Isolated: shadowed `ps`,
+  stubbed `afplay`, a regular file standing in for the terminal device.
+- `test/hook-flow.sh` now sends a real `notification_type`, and asserts that an
+  idle nudge mid-turn is a no-op.
+
 ## [0.2.0] — unreleased
 
 An audit of every indicator warden paints, against what it can actually observe.

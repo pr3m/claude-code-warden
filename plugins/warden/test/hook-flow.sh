@@ -90,7 +90,13 @@ fire on-pretool.sh "{$BASE,\"tool_name\":\"Read\",\"tool_input\":{}}"
 is "on-pretool: read glyph"        "📖"  "$(field 3)"
 is "on-pretool: tool in flight"    "yes" "$(inflight)"
 
-fire on-notify.sh "{$BASE,\"message\":\"permission needed\"}"
+# The type is what makes this a dialog rather than a nudge — on-notify now
+# classifies before it touches anything, so an untyped payload is a no-op.
+fire on-notify.sh "{$BASE,\"notification_type\":\"idle_prompt\",\"message\":\"waiting for input\"}"
+is "on-notify: idle nudge is a no-op"  "working" "$(field 1)"
+is "on-notify: idle leaves flight set" "yes"     "$(inflight)"
+
+fire on-notify.sh "{$BASE,\"notification_type\":\"permission_prompt\",\"message\":\"permission needed\"}"
 is "on-notify: state needs_you"    "needs_you" "$(field 1)"
 # A permission prompt fires BEFORE the tool runs. A stale marker here would
 # suppress stall detection for the entire time the session sits blocked.

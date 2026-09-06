@@ -7,3 +7,8 @@ Thumbs.db
 
 # Personal, per-machine Claude Code settings (shared settings.json is committed)
 .claude/settings.local.json
+
+# Test scratch, and the machine-specific half of the notify wiring — neither
+# ships with the plugin.
+.wardentmp/
+local-notify-fix/

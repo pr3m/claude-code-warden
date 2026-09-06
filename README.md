@@ -208,6 +208,7 @@ no mid-turn context refresh — the tab still shows state, activity, and label.
 | `waitingIntervalMs` | `400` | waiting frame interval — keep it visibly slower than the spinner, that contrast *is* the signal |
 | `keeperIntervalSeconds` | `2` | how often a static tab is repainted so Claude Code's own title can't take it back (`0` is treated as 1) |
 | `showProject` / `showActivity` / `showContext` | `true` | what rides the tab |
+| `audioEnabled` | `true` | the machine's mute switch — see below |
 | `escalateAfterSeconds` | `45` | needs-you → escalated threshold (`0` = off) |
 | `escalateReping` | `true` | re-ping the system sound on escalation |
 | `escalateMaxSeconds` | `3600` | stop nagging a session nobody ever came back to |
@@ -218,6 +219,43 @@ no mid-turn context refresh — the tab still shows state, activity, and label.
 | `maxLifetimeSeconds` | `86400` | backstop for a session that crashed without emitting `Stop` — **not** a turn limit |
 | `glyphs.*` | see above | override any state glyph |
 | `projectLabelCommand` | — | a shell command (`$WARDEN_CWD`) printing a label |
+
+### Sound
+
+```sh
+warden sound             # what's set right now
+warden sound off         # silence — tracking keeps running
+warden sound on          # unmute
+warden sound reping off  # hand the repeating chime to another tool
+```
+
+`audioEnabled` is a **shared** switch rather than a warden-only one. Most setups
+end up with more than one thing that chimes — warden's escalation ping, a
+personal notification hook, an app — and muting them one at a time is how you
+end up hunting a sound you can't find. Any local tool can opt in in one line:
+
+```sh
+[ "$(jq -r '.audioEnabled' ~/.claude/warden/config.json 2>/dev/null)" != false ] || exit 0
+```
+
+Scope, precisely: it silences the emitters that **choose to read the key**. It
+is not a system mute, and it cannot reach a program that has never heard of it.
+
+Two things it deliberately does **not** do:
+
+- **It never turns off tracking.** Muted, warden still classifies, still paints
+  `❓`/`‼️`, still writes the status bus, still escalates. You lose the noise, not
+  the information.
+- **It is read live, at the moment of playback**, so a daemon that is already
+  detached goes quiet on its next tick without being killed. That applies to a
+  daemon *running this version of the script*: a process launched from an older
+  copy carries that older code for its whole life and has to be restarted before
+  it can honour anything new. Updating a file on disk never reaches a running
+  shell.
+
+`escalateReping` is the separate question of *who owns* the repeating chime.
+Leave it on if warden is the only thing making noise; turn it off when something
+else already covers a blocked session, so the two don't talk over each other.
 
 ---
 

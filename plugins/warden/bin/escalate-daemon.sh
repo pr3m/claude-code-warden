@@ -23,7 +23,6 @@ trap 'rm -f "$PIDFILE" 2>/dev/null || true' EXIT
 trap 'exit 0' TERM INT HUP
 
 DELAY="$(warden_cfg '.escalateAfterSeconds' '45')"
-REPING="$(warden_cfg '.escalateReping' 'true')"
 # Self-reap bound: a session that ends without its Stop/Notification hook firing
 # would otherwise leave this loop nagging a dead — or worse, recycled — tty
 # indefinitely. This has its own key rather than sharing the spinner's lifetime
@@ -40,8 +39,13 @@ still_waiting() {
   [ "$_state" = "needs_you" ]
 }
 
+# Both gates are read here, inside the loop, rather than once at start-up: this
+# process is already detached by the time you decide the room should be quiet,
+# and re-reading is the only way it can obey without being killed and restarted.
+# 45s between ticks — a jq call per tick costs nothing.
 ping() {
-  [ "$REPING" = 'true' ] || return 0
+  warden_audio_enabled || return 0                       # shared mute (audioEnabled)
+  [ "$(warden_cfg '.escalateReping' 'true')" = 'true' ] || return 0
   [ "$(warden_platform)" = 'darwin' ] || return 0
   afplay /System/Library/Sounds/Glass.aiff >/dev/null 2>&1 &
 }

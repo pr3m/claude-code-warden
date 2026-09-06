@@ -489,6 +489,7 @@ warden_default_config() {
   "showProject": true,
   "showActivity": true,
   "showContext": true,
+  "audioEnabled": true,
   "escalateAfterSeconds": 45,
   "escalateReping": true,
   "escalateMaxSeconds": 3600,
@@ -513,6 +514,23 @@ warden_default_config() {
 JSON
 }
 
+# One switch for every local tool that makes a noise on this machine.
+#
+# A machine usually runs more than one attention emitter (warden's escalation
+# ping plus whatever else is wired into the Notification hooks). Muting them one
+# at a time is how you end up with a stray chime you cannot find, so the answer
+# lives in the config warden already owns rather than in a second system.
+#
+# Read live at every playback decision — a detached daemon picks the change up
+# on its next tick instead of needing a restart. Absent key = enabled, so an
+# existing config keeps its current behaviour.
+#
+# SOUND ONLY. State tracking, the status bus, glyphs, classification and the
+# visual escalation all keep running when this is off.
+warden_audio_enabled() {
+  [ "$(warden_cfg '.audioEnabled' 'true')" = 'true' ]
+}
+
 warden_ensure_config() {
   warden_ensure_dirs
   local f; f="$(warden_config_file)"
@@ -533,6 +551,21 @@ warden_cfg() {
     if [ -n "$val" ] && [ "$val" != "null" ]; then printf '%s\n' "$val"; return; fi
   fi
   printf '%s\n' "$def"
+}
+
+# warden_cfg_set <jq-path> <raw-json-value> — set one key in config.json,
+# atomically, leaving every other key exactly as the user left it. The value is
+# raw JSON (true / false / 45 / "text"), so callers must pass a literal they
+# built themselves — never unvalidated input.
+warden_cfg_set() {
+  local path="$1" val="$2" f tmp
+  warden_has_jq || return 1
+  warden_ensure_config
+  f="$(warden_config_file)"; tmp="${f}.$$.tmp"
+  jq "$path = $val" "$f" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$f" 2>/dev/null && return 0
+  rm -f "$tmp" 2>/dev/null
+  return 1
 }
 
 # ---------------------------------------------------------------------------
