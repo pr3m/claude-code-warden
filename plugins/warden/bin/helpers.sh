@@ -482,16 +482,25 @@ warden_dispatch_state() {
 
 # ---------------------------------------------------------------------------
 # Config — created on first SessionStart. warden_cfg reads a key with default.
+#
+# The frame lists default to a single frame each, so the title is stable while
+# a state lasts and changes only on a real transition. Animating them repaints
+# the tab several times a second, and a desktop activity tracker (Toggl,
+# RescueTime, Timing) reads every repaint as input: an unattended overnight
+# agent run then books itself as hours at the keyboard. Liveness is already
+# carried by the OSC 9;4 progress pulse, which set_pulse writes on state change
+# and which never touches the title. Anyone who wants the animation back just
+# lists more frames.
 # ---------------------------------------------------------------------------
 
 warden_default_config() {
   cat <<'JSON'
 {
   "spinner": true,
-  "spinnerFrames": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"],
-  "spinnerIntervalMs": 120,
-  "waitingFrames": ["◐", "◓", "◑", "◒"],
-  "waitingIntervalMs": 400,
+  "spinnerFrames": ["⚙"],
+  "spinnerIntervalMs": 500,
+  "waitingFrames": ["◐"],
+  "waitingIntervalMs": 1000,
   "keeperIntervalSeconds": 2,
   "showProject": true,
   "showActivity": true,

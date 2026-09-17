@@ -201,11 +201,11 @@ no mid-turn context refresh — the tab still shows state, activity, and label.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `spinner` | `true` | animate the tab while working |
-| `spinnerFrames` | braille | array of frames — try `["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"]` |
-| `spinnerIntervalMs` | `120` | frame interval |
-| `waitingFrames` | `["◐","◓","◑","◒"]` | frames for waiting-on-background-work |
-| `waitingIntervalMs` | `400` | waiting frame interval — keep it visibly slower than the spinner, that contrast *is* the signal |
+| `spinner` | `true` | run the animator that owns the tab title |
+| `spinnerFrames` | `["⚙"]` | array of frames. One frame holds the title still; list more to animate — try `["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"]`. See the note below first |
+| `spinnerIntervalMs` | `500` | frame interval |
+| `waitingFrames` | `["◐"]` | frames for waiting-on-background-work |
+| `waitingIntervalMs` | `1000` | waiting frame interval — if you animate both, keep this visibly slower than the spinner, that contrast *is* the signal |
 | `keeperIntervalSeconds` | `2` | how often a static tab is repainted so Claude Code's own title can't take it back (`0` is treated as 1) |
 | `showProject` / `showActivity` / `showContext` | `true` | what rides the tab |
 | `audioEnabled` | `true` | the machine's mute switch — see below |
@@ -219,6 +219,23 @@ no mid-turn context refresh — the tab still shows state, activity, and label.
 | `maxLifetimeSeconds` | `86400` | backstop for a session that crashed without emitting `Stop` — **not** a turn limit |
 | `glyphs.*` | see above | override any state glyph |
 | `projectLabelCommand` | — | a shell command (`$WARDEN_CWD`) printing a label |
+
+### A note on animating the frames
+
+The frame lists ship with one frame each, so the tab title is **stable while a
+state lasts** and changes only on a real transition. That is deliberate.
+
+Animating repaints the title several times a second, and a desktop activity
+tracker — Toggl, RescueTime, Timing — samples the foreground window title and
+reads every repaint as input. An unattended overnight agent run then books
+itself as hours at the keyboard. One user's tracker credited a 10.6-hour
+"focus session" to a spinner animating over a sleeping laptop; 28% of a
+fortnight's recorded activity turned out to be the animation.
+
+You lose nothing by holding it still. Liveness already rides the OSC 9;4
+progress pulse, which the terminal renders natively and which never touches the
+title — and the state glyphs (⚙ ❓ ‼️ 🐢 ✅) still change the moment the state
+does. Add frames back if you want the motion and don't track your time.
 
 ### Sound
 
