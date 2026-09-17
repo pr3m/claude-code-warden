@@ -444,6 +444,13 @@ warden_relabel_tty() {
     [ -f "$f" ] || continue
     [ "$(jq -r '.tty // ""' "$f" 2>/dev/null)" = "$tty" ] || continue
     id="$(jq -r '.id // ""' "$f" 2>/dev/null)"; [ -n "$id" ] || continue
+    # A tty outlives the sessions that used it: the OS recycles /dev/ttysNNN and
+    # every past session keeps a record naming it. Without this guard the loop
+    # paints one title per record — each label derived from that record's own
+    # cwd — so a live tab flickers through the labels of dead sessions, and a
+    # desktop activity tracker books every repaint as work. Tolerant by design:
+    # a missing owner file returns success, so this never silences a live tab.
+    warden_owns_tty "$tty" "$id" || continue
     cwd="$(jq -r '.cwd // ""' "$f" 2>/dev/null)"
     proj="$(warden_label_for "$tty" "$cwd")"
     rs="idle"; ra=""; rc=""; ratt=""
