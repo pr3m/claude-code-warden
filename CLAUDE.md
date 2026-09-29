@@ -75,7 +75,7 @@ writers, label resolution, daemon lifecycle. Read it first.
   hot loop**.
 - **Daemons**: exactly one spinner per session (atomic `mkdir` lock), killed via
   `SIGTERM` (a `trap` releases the lock). The spinner resolves the terminal's
-  real device (`/dev/ttysNNN`, via a parent-pid walk) so it can paint an
+  real device (`/dev/ttysNNN`, via a parent-pid walk) so it can paint an <!-- no-exist-check -->
   unfocused tab.
 - **Custom labels**: a per-tty `<tty>.label` override → `$WARDEN_LABEL` → auto
   (git repo / dir). warden owns the title to animate it, so renaming goes
@@ -84,7 +84,7 @@ writers, label resolution, daemon lifecycle. Read it first.
 ## Developing & releasing
 
 **Installed plugins are FROZEN cache copies** at
-`~/.claude/plugins/cache/claude-code-warden/...`. Editing the source here does
+`~/.claude/plugins/cache/claude-code-warden/...`. <!-- no-exist-check --> Editing the source here does
 **not** affect running or new sessions until you bump the version and reinstall.
 
 To ship a change:
